@@ -16,3 +16,4 @@ private:
 	ComPtr<ID3D12GraphicsCommandList> m_CommandList;
 	std::vector<ComPtr<ID3D12Resource>> tempUploadBuffers;
 };
+

@@ -32,6 +32,12 @@ namespace std {
 	};
 }
 
+constexpr size_t D3D12_CONSTANT_BUFFER_ALIGNMENT = 256;
+template<class T>
+static constexpr UINT GetConstBufferSize() {
+	return (sizeof(T) + D3D12_CONSTANT_BUFFER_ALIGNMENT) & ~D3D12_CONSTANT_BUFFER_ALIGNMENT;
+}
+
 #include<unordered_map>
 
 // DirectX

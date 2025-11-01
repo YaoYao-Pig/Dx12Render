@@ -19,7 +19,7 @@ LRESULT CALLBACK D3D12App::WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 // --- 构造函数 (修改) ---
 D3D12App::D3D12App(UINT width, UINT height, const wchar_t* title) :
     m_Width(width), m_Height(height), m_Title(title), m_hWnd(nullptr),
-    m_RtvDescriptorSize(0), m_pConstantBufferDataBegin(nullptr),
+    m_RtvDescriptorSize(0), m_pConstantBufferDataBegin(nullptr), m_LightConstantBuffer(nullptr),
     m_FenceValue(0), m_FenceEvent(nullptr), m_FrameIndex(0), m_TotalTime(0.0f),
     m_Camera(), // 默认构造 m_Camera
     m_InputState(), // 零初始化 m_InputState
@@ -193,9 +193,26 @@ void D3D12App::InitD3D12()
     ));
     m_DepthStencilBuffer->SetName(L"Depth Stencil Buffer");
     m_Device->CreateDepthStencilView(m_DepthStencilBuffer.Get(), nullptr, m_DsvHeap->GetCPUDescriptorHandleForHeapStart());
+    
+    constexpr  UINT lightSize = (sizeof(Light) + 255) & ~255;
+    resourceDesc = CD3DX12_RESOURCE_DESC::Buffer(lightSize);
+    heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    ThrowIfFailed(m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        __uuidof(ID3D12Resource), (void**)&m_LightConstantBuffer));
+
+    D3D12_CONSTANT_BUFFER_VIEW_DESC constBufferDesc;
+    constBufferDesc.BufferLocation = m_LightConstantBuffer->GetGPUVirtualAddress();
+    constBufferDesc.SizeInBytes = lightSize;
+    D3D12_CPU_DESCRIPTOR_HANDLE constHandler = m_ConstHeap->GetCPUDescriptorHandleForHeapStart();
+    m_Device->CreateConstantBufferView(&constBufferDesc, constHandler);
+    m_LightConstantBuffer->SetName(L"Light Constant Buffer");
+    m_LightConstantBuffer->Map(0, nullptr, (void**)&m_lightConstBufferDataBegin);
+
+
     ThrowIfFailed(m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&m_CommandAllocator));
     ThrowIfFailed(m_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_CommandAllocator.Get(), nullptr, __uuidof(ID3D12GraphicsCommandList), (void**)&m_CommandList));
     ThrowIfFailed(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&m_Fence));
+    
     m_FenceValue = 1;
     m_FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (m_FenceEvent == nullptr) ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
@@ -226,16 +243,24 @@ void D3D12App::CreateDescriptorHeaps()
     srvHeapDesc.NumDescriptors = 1;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(m_Device->CreateDescriptorHeap(&srvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_SrvHeap));
+
+
+    D3D12_DESCRIPTOR_HEAP_DESC constHeapDesc = {};
+    constHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    constHeapDesc.NumDescriptors = 1;
+    constHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ThrowIfFailed(m_Device->CreateDescriptorHeap(&constHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_ConstHeap));
 }
 
 void D3D12App::CreateRootSignature()
 {
-    CD3DX12_DESCRIPTOR_RANGE ranges[1];
+    CD3DX12_DESCRIPTOR_RANGE ranges[2];
     ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); //一个srv类型的view，存在t0
-    CD3DX12_ROOT_PARAMETER parameters[2];
-    parameters[0].InitAsConstantBufferView(0);//一个const
+    ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1);// 一个cbv，存在于b1;
+    CD3DX12_ROOT_PARAMETER parameters[3];
+    parameters[0].InitAsConstantBufferView(0);//一个const,存在于b1
     parameters[1].InitAsDescriptorTable(1, &ranges[0]);
-
+    parameters[2].InitAsDescriptorTable(1, &ranges[1]);
 
     //创建sampler
     D3D12_STATIC_SAMPLER_DESC sampler = {};
@@ -313,6 +338,7 @@ void D3D12App::CreateResources()
 {
     resourceManager.UploadResource(geometry.vertexs.data(), geometry.vertexSize, m_VertexBuffer);
     resourceManager.UploadResource(geometry.indices.data(), geometry.indiceSize, m_IndexBuffer);
+
     int textureWidth, textureHeight, textureChannels;
     stbi_uc* pTextureData = stbi_load("texture.png", &textureWidth, &textureHeight, &textureChannels, STBI_rgb_alpha);
     if (pTextureData == nullptr) { throw std::runtime_error("Failed to load texture file!"); }
@@ -395,6 +421,10 @@ void D3D12App::CreateResources()
     m_ConstantBuffer->SetName(L"Constant Buffer");
     ThrowIfFailed(m_ConstantBuffer->Map(0, nullptr, (void**)&m_pConstantBufferDataBegin));
 
+
+
+
+
     ThrowIfFailed(m_CommandList->Close());
     ID3D12CommandList* ppCommandLists[] = { m_CommandList.Get() };
     m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
@@ -404,11 +434,14 @@ void D3D12App::CreateResources()
 // --- 加载资源 (同前) ---
 void D3D12App::OnLoadAssets()
 {
+    float pos[3] = { 0.5f, -0.8f, -1.0f };
+    float dir[3] = { 1.0f, 1.0f, 0.9f };
+    light.Init(pos, dir);
+    memcpy(m_lightConstBufferDataBegin, &light, sizeof(Light));
     CreateRootSignature();
     shaderCompiler.CompileShader();
     CreatePSO();
     CreateResources();
-    RunCommand();
     WaitForGpu();
     resourceManager.ClearTmpBuffers();
 }
@@ -467,8 +500,8 @@ void D3D12App::PopulateCommandList()
 
 
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress());
-    dx12Object.SetRootSignatureDescriptorTable({ m_SrvHeap.Get() }, { 1 });
-
+    dx12Object.SetRootSignatureDescriptorTable({ m_SrvHeap.Get()}, {1}); //要分开绑定，因为CommandList每次只能绑定一个SRV/CSV
+    dx12Object.SetRootSignatureDescriptorTable({ m_ConstHeap.Get() }, { 2 });
     m_CommandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
     auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
         m_RenderTargets[m_FrameIndex].Get(),
@@ -515,6 +548,11 @@ void D3D12App::Cleanup()
     {
         m_ConstantBuffer->Unmap(0, nullptr);
         m_pConstantBufferDataBegin = nullptr;
+    }
+    if (m_lightConstBufferDataBegin)
+    {
+        m_LightConstantBuffer->Unmap(0, nullptr);
+        m_lightConstBufferDataBegin = nullptr;
     }
     if (m_FenceEvent)
     {

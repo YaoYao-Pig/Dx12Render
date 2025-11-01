@@ -8,6 +8,7 @@
 #include "Geometry.h"
 #include "ResourceManager.h"
 #include "DX12Object.h"
+#include "Light.h"
 class D3D12App
 {
 public:
@@ -50,6 +51,7 @@ protected:
     ComPtr<ID3D12DescriptorHeap> m_RtvHeap;
     ComPtr<ID3D12DescriptorHeap> m_DsvHeap;
     ComPtr<ID3D12DescriptorHeap> m_SrvHeap;
+    ComPtr<ID3D12DescriptorHeap> m_ConstHeap;
     UINT m_RtvDescriptorSize;
     ComPtr<ID3D12Resource> m_DepthStencilBuffer;
 
@@ -65,7 +67,9 @@ protected:
 
     // ... (常量缓冲区 - 同前) ...
     ComPtr<ID3D12Resource> m_ConstantBuffer;
+    ComPtr<ID3D12Resource> m_LightConstantBuffer;
     UINT8* m_pConstantBufferDataBegin;
+    UINT8* m_lightConstBufferDataBegin;
     struct SceneConstants { XMFLOAT4X4 wvpMatrix; XMFLOAT4X4 worldMatrix; float padding[32]; };
     SceneConstants m_Constants;
 
@@ -76,13 +80,9 @@ protected:
     UINT m_FrameIndex;
 
     float m_TotalTime; // (现在只用于立方体旋转)
-
-    // ** 新增: 摄像机和输入状态 **
     Camera m_Camera;
     InputState m_InputState;
     POINT m_LastMousePos;
-
-    // ... (顶点结构体 - 同前) ...
     
 
     Geometry geometry;
@@ -91,6 +91,8 @@ protected:
     ResourceManager resourceManager;
 
     DX12Object dx12Object;
+
+    Light light;
 
 private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);

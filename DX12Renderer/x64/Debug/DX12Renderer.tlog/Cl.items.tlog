@@ -1,4 +1,10 @@
 D:\Program\DX12Renderer\Camera.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\Camera.obj
 D:\Program\DX12Renderer\D3D12App.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\D3D12App.obj
+D:\Program\DX12Renderer\DX12Object.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\DX12Object.obj
+D:\Program\DX12Renderer\Geometry.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\Geometry.obj
+D:\Program\DX12Renderer\Light.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\Light.obj
 D:\Program\DX12Renderer\Main.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\Main.obj
 D:\Program\DX12Renderer\PCH.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\PCH.obj
+D:\Program\DX12Renderer\PSOContainer.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\PSOContainer.obj
+D:\Program\DX12Renderer\ResourceManager.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\ResourceManager.obj
+D:\Program\DX12Renderer\ShaderCompiler.cpp;D:\Program\DX12Renderer\DX12Renderer\x64\Debug\ShaderCompiler.obj

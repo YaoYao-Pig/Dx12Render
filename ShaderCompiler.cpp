@@ -5,6 +5,7 @@ ShaderCompiler::ShaderCompiler()
 {
     vertexShaderCode = R"(
         cbuffer SceneConstants : register(b0) { float4x4 g_WVP; float4x4 g_World; };
+        cbuffer lightConstants : register(b1) { float3 lightPos; float3 lightDir; };
         struct VS_INPUT { float3 pos : POSITION; float4 color : COLOR; float2 tex : TEXCOORD; float3 normal : NORMAL; };
         struct VS_OUTPUT { float4 pos : SV_POSITION; float4 color : COLOR; float2 tex : TEXCOORD; float3 normal_world : NORMAL; };
         VS_OUTPUT VSMain(VS_INPUT input)
