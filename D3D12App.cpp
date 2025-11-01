@@ -4,6 +4,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "D3D12App.h"
+#include "ShaderCompiler.h"
 
 // --- 静态 WndProc 路由 (同前) ---
 LRESULT CALLBACK D3D12App::WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -92,7 +93,9 @@ LRESULT D3D12App::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 // --- 运行 (主循环) (修改) ---
 void D3D12App::Run()
 {
-    InitWindow(); InitD3D12(); OnLoadAssets();
+    InitWindow(); 
+    InitD3D12(); 
+    OnLoadAssets();
     ShowWindow(m_hWnd, SW_SHOWDEFAULT); UpdateWindow(m_hWnd);
     LARGE_INTEGER lastTime; LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency); QueryPerformanceCounter(&lastTime);
@@ -137,7 +140,6 @@ void D3D12App::InitWindow()
 // --- D3D12 初始化 (同前) ---
 void D3D12App::InitD3D12()
 {
-    // ... (同前, 100% 未修改) ...
 #if defined(_DEBUG)
     ComPtr<ID3D12Debug> pDebugController;
     if (SUCCEEDED(D3D12GetDebugInterface(__uuidof(ID3D12Debug), (void**)&pDebugController)))
@@ -165,22 +167,9 @@ void D3D12App::InitD3D12()
     ThrowIfFailed(factory->CreateSwapChainForHwnd(m_CommandQueue.Get(), m_hWnd, &swapChainDesc, nullptr, nullptr, &swapChain1));
     ThrowIfFailed(swapChain1.As(&m_SwapChain));
     m_FrameIndex = m_SwapChain->GetCurrentBackBufferIndex();
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-        rtvHeapDesc.NumDescriptors = 2;
-        rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        ThrowIfFailed(m_Device->CreateDescriptorHeap(&rtvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_RtvHeap));
-        m_RtvDescriptorSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
-        dsvHeapDesc.NumDescriptors = 1;
-        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        ThrowIfFailed(m_Device->CreateDescriptorHeap(&dsvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_DsvHeap));
-        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-        srvHeapDesc.NumDescriptors = 1;
-        srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        ThrowIfFailed(m_Device->CreateDescriptorHeap(&srvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_SrvHeap));
-    }
+    
+    CreateDescriptorHeaps();
+    
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RtvHeap->GetCPUDescriptorHandleForHeapStart());
     for (UINT n = 0; n < 2; n++)
     {
@@ -210,78 +199,74 @@ void D3D12App::InitD3D12()
     m_FenceValue = 1;
     m_FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (m_FenceEvent == nullptr) ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
+
+    // 其他
+    shaderCompiler.Init({ "VSMain","PSMain" });
+    psoContainer.Init(m_Device);
+    geometry.LoadGeometry();
+    resourceManager.Init(m_Device, m_CommandList);
+    dx12Object.Init(m_Device, m_CommandList);
 }
 
-// --- 加载资源 (同前) ---
-void D3D12App::OnLoadAssets()
+void D3D12App::CreateDescriptorHeaps()
 {
-    // ... (这部分和你现有的代码一模一样, 100% 未修改) ...
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
+    rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtvHeapDesc.NumDescriptors = 2;
+    ThrowIfFailed(m_Device->CreateDescriptorHeap(&rtvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_RtvHeap));
+    m_RtvDescriptorSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+    dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsvHeapDesc.NumDescriptors = 1;
+    ThrowIfFailed(m_Device->CreateDescriptorHeap(&dsvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_DsvHeap));
+     
+    D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+    srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srvHeapDesc.NumDescriptors = 1;
+    srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ThrowIfFailed(m_Device->CreateDescriptorHeap(&srvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_SrvHeap));
+}
+
+void D3D12App::CreateRootSignature()
+{
     CD3DX12_DESCRIPTOR_RANGE ranges[1];
-    ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-    CD3DX12_ROOT_PARAMETER rootParameters[2];
-    rootParameters[0].InitAsConstantBufferView(0);
-    rootParameters[1].InitAsDescriptorTable(1, &ranges[0]);
+    ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); //一个srv类型的view，存在t0
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstantBufferView(0);//一个const
+    parameters[1].InitAsDescriptorTable(1, &ranges[0]);
+
+
+    //创建sampler
     D3D12_STATIC_SAMPLER_DESC sampler = {};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.MinLOD = 0; sampler.MaxLOD = D3D12_FLOAT32_MAX;
-    sampler.ShaderRegister = 0; sampler.RegisterSpace = 0;
+
+    sampler.MinLOD = 0;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;//s0
+    sampler.RegisterSpace = 0;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-    rootSignatureDesc.Init(
-        _countof(rootParameters), rootParameters,
+
+    CD3DX12_ROOT_SIGNATURE_DESC signatureDes = {};
+    signatureDes.Init(_countof(parameters), parameters,
         1, &sampler,
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
-    );
-    ComPtr<ID3DBlob> signature; ComPtr<ID3DBlob> error;
-    ThrowIfFailed(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error));
-    ThrowIfFailed(m_Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), __uuidof(ID3D12RootSignature), (void**)&m_RootSignature));
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    ComPtr<ID3DBlob> signature, error;
+    ThrowIfFailed(D3D12SerializeRootSignature(&signatureDes, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error));
 
-    std::string shaderCode = R"(
-        cbuffer SceneConstants : register(b0) { float4x4 g_WVP; float4x4 g_World; };
-        struct VS_INPUT { float3 pos : POSITION; float4 color : COLOR; float2 tex : TEXCOORD; float3 normal : NORMAL; };
-        struct VS_OUTPUT { float4 pos : SV_POSITION; float4 color : COLOR; float2 tex : TEXCOORD; float3 normal_world : NORMAL; };
-        VS_OUTPUT VSMain(VS_INPUT input)
-        {
-            VS_OUTPUT output;
-            output.pos = mul(g_WVP, float4(input.pos, 1.0f));
-            output.normal_world = normalize(mul((float3x3)g_World, input.normal));
-            output.color = input.color;
-            output.tex = input.tex;
-            return output;
-        }
-    )";
-    ComPtr<ID3DBlob> vertexShader;
-    ThrowIfFailed(D3DCompile(
-        shaderCode.c_str(), shaderCode.length(), nullptr, nullptr, nullptr,
-        "VSMain", "vs_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0,
-        &vertexShader, nullptr
-    ));
-    shaderCode = R"(
-        Texture2D g_Texture : register(t0);
-        SamplerState g_Sampler : register(s0);
-        struct PS_INPUT { float4 pos : SV_POSITION; float4 color : COLOR; float2 tex : TEXCOORD; float3 normal_world : NORMAL; };
-        float4 PSMain(PS_INPUT input) : SV_TARGET 
-        {
-            float3 lightDir = normalize(float3(0.5f, -0.8f, -1.0f));
-            float3 lightColor = float3(1.0f, 1.0f, 0.9f);
-            float ambient = 0.1f;
-            float diffuse = saturate(dot(input.normal_world, -lightDir));
-            float4 texColor = g_Texture.Sample(g_Sampler, input.tex);
-            float3 finalColor = texColor.rgb * input.color.rgb;
-            finalColor = finalColor * (ambient + (diffuse * lightColor));
-            return float4(finalColor, texColor.a);
-        }
-    )";
-    ComPtr<ID3DBlob> pixelShader;
-    ThrowIfFailed(D3DCompile(
-        shaderCode.c_str(), shaderCode.length(), nullptr, nullptr, nullptr,
-        "PSMain", "ps_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0,
-        &pixelShader, nullptr
-    ));
+    ThrowIfFailed(m_Device->CreateRootSignature(0,
+        signature->GetBufferPointer(),
+        signature->GetBufferSize(),
+        __uuidof(ID3D12RootSignature),
+        (void**)&m_RootSignature));
+}
 
+void D3D12App::CreatePSO()
+{
+    //定义输入定点语义
     D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -289,24 +274,27 @@ void D3D12App::OnLoadAssets()
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 28, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
-
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
     psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
     psoDesc.pRootSignature = m_RootSignature.Get();
-    psoDesc.VS.pShaderBytecode = vertexShader->GetBufferPointer();
-    psoDesc.VS.BytecodeLength = vertexShader->GetBufferSize();
-    psoDesc.PS.pShaderBytecode = pixelShader->GetBufferPointer();
-    psoDesc.PS.BytecodeLength = pixelShader->GetBufferSize();
+    psoDesc.VS.pShaderBytecode = shaderCompiler.vertexShader->GetBufferPointer();
+    psoDesc.VS.BytecodeLength = shaderCompiler.vertexShader->GetBufferSize();
+    psoDesc.PS.pShaderBytecode = shaderCompiler.pixelShader->GetBufferPointer();
+    psoDesc.PS.BytecodeLength = shaderCompiler.pixelShader->GetBufferSize();
+
     D3D12_RASTERIZER_DESC rasterizerDesc = {};
     rasterizerDesc.FillMode = D3D12_FILL_MODE_SOLID;
     rasterizerDesc.CullMode = D3D12_CULL_MODE_NONE;
     rasterizerDesc.FrontCounterClockwise = FALSE;
     rasterizerDesc.DepthClipEnable = TRUE;
+
     psoDesc.RasterizerState = rasterizerDesc;
+
     D3D12_BLEND_DESC blendDesc = {};
     blendDesc.AlphaToCoverageEnable = FALSE; blendDesc.IndependentBlendEnable = FALSE;
     blendDesc.RenderTarget[0].BlendEnable = FALSE;
     blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
     psoDesc.BlendState = blendDesc;
     psoDesc.DepthStencilState.DepthEnable = TRUE;
     psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -317,79 +305,14 @@ void D3D12App::OnLoadAssets()
     psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     psoDesc.SampleDesc.Count = 1;
-    ThrowIfFailed(m_Device->CreateGraphicsPipelineState(&psoDesc, __uuidof(ID3D12PipelineState), (void**)&m_PipelineState));
 
-    auto CreateAndUploadBuffer =
-        [&](void* pData, UINT64 dataSize, ComPtr<ID3D12Resource>& pBuffer, const wchar_t* pName)
-        {
-            auto heapPropsDefault = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
-            auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(dataSize);
-            ThrowIfFailed(m_Device->CreateCommittedResource(
-                &heapPropsDefault, D3D12_HEAP_FLAG_NONE, &bufferDesc,
-                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, __uuidof(ID3D12Resource), (void**)&pBuffer));
-            pBuffer->SetName(pName);
-            ComPtr<ID3D12Resource> pUploadBuffer;
-            auto heapPropsUpload = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-            ThrowIfFailed(m_Device->CreateCommittedResource(
-                &heapPropsUpload, D3D12_HEAP_FLAG_NONE, &bufferDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, __uuidof(ID3D12Resource), (void**)&pUploadBuffer));
-            pUploadBuffer->SetName(L"Upload Heap");
-            void* pCpuData = nullptr;
-            pUploadBuffer->Map(0, nullptr, &pCpuData);
-            memcpy(pCpuData, pData, dataSize);
-            pUploadBuffer->Unmap(0, nullptr);
-            m_CommandList->CopyResource(pBuffer.Get(), pUploadBuffer.Get());
-            return pUploadBuffer;
-        };
-    std::vector<ComPtr<ID3D12Resource>> tempUploadBuffers;
+    psoContainer.BuildPSO(RenderQueue::Common, &psoDesc);
+}
 
-    Vertex cubeVertices[] =
-    {
-        { { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f }, { 0.0f, 0.0f, -1.0f } },
-        { { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f } },
-        { {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f, -1.0f } },
-        { {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f, -1.0f } },
-        { { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f, 1.0f } },
-        { {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f }, { 0.0f, 0.0f, 1.0f } },
-        { {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f } },
-        { { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f } },
-        { { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f } },
-        { { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f } },
-        { { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f }, { 1.0f, 0.0f, 0.0f } },
-        { { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f, 0.0f } },
-        { {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f }, { -1.0f, 0.0f, 0.0f } },
-        { {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f }, { -1.0f, 0.0f, 0.0f } },
-        { {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f }, { -1.0f, 0.0f, 0.0f } },
-        { {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { -1.0f, 0.0f, 0.0f } },
-        { { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f }, { 0.0f, -1.0f, 0.0f } },
-        { { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } },
-        { {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } },
-        { {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, -1.0f, 0.0f } },
-        { { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f }, { 0.0f, 1.0f, 0.0f } },
-        { { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f } },
-        { {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 1.0f, 0.0f } },
-        { {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f, 0.0f } }
-    };
-    const UINT vertexBufferSize = sizeof(cubeVertices);
-    tempUploadBuffers.push_back(
-        CreateAndUploadBuffer(cubeVertices, vertexBufferSize, m_VertexBuffer, L"Vertex Buffer")
-    );
-
-    // (使用我们“损坏”但有效的 CW 索引)
-    WORD cubeIndices[] =
-    {
-        0, 1, 2, 0, 2, 3,
-        4, 5, 6, 4, 6, 7,
-        8, 9, 10, 8, 10, 11,
-        12, 13, 14, 12, 14, 15,
-        16, 17, 18, 16, 18, 19,
-        20, 21, 22, 20, 22, 23
-    };
-    const UINT indexBufferSize = sizeof(cubeIndices);
-    tempUploadBuffers.push_back(
-        CreateAndUploadBuffer(cubeIndices, indexBufferSize, m_IndexBuffer, L"Index Buffer")
-    );
-
+void D3D12App::CreateResources()
+{
+    resourceManager.UploadResource(geometry.vertexs.data(), geometry.vertexSize, m_VertexBuffer);
+    resourceManager.UploadResource(geometry.indices.data(), geometry.indiceSize, m_IndexBuffer);
     int textureWidth, textureHeight, textureChannels;
     stbi_uc* pTextureData = stbi_load("texture.png", &textureWidth, &textureHeight, &textureChannels, STBI_rgb_alpha);
     if (pTextureData == nullptr) { throw std::runtime_error("Failed to load texture file!"); }
@@ -409,6 +332,7 @@ void D3D12App::OnLoadAssets()
     m_Texture->SetName(L"Texture");
     UINT64 textureUploadBufferSize;
     m_Device->GetCopyableFootprints(&textureDesc, 0, 1, 0, nullptr, nullptr, nullptr, &textureUploadBufferSize);
+
     ComPtr<ID3D12Resource> pTextureUploadBuffer;
     heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
     auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(textureUploadBufferSize);
@@ -418,7 +342,8 @@ void D3D12App::OnLoadAssets()
         nullptr, __uuidof(ID3D12Resource), (void**)&pTextureUploadBuffer
     ));
     pTextureUploadBuffer->SetName(L"Texture Upload Heap");
-    tempUploadBuffers.push_back(pTextureUploadBuffer);
+    resourceManager.AddResource2TmpBuffer(pTextureUploadBuffer);
+
     D3D12_SUBRESOURCE_DATA textureData = {};
     textureData.pData = pTextureData;
     textureData.RowPitch = textureWidth * texturePixelSize;
@@ -429,8 +354,8 @@ void D3D12App::OnLoadAssets()
     CD3DX12_RESOURCE_BARRIER barriers[3] = {
         CD3DX12_RESOURCE_BARRIER::Transition(
             m_VertexBuffer.Get(),
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+            D3D12_RESOURCE_STATE_COPY_DEST, //之前：它是一个“复制目标”
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER // 之后：它是一个“顶点/常量缓冲”
         ),
         CD3DX12_RESOURCE_BARRIER::Transition(
             m_IndexBuffer.Get(),
@@ -447,10 +372,10 @@ void D3D12App::OnLoadAssets()
 
     m_VertexBufferView.BufferLocation = m_VertexBuffer->GetGPUVirtualAddress();
     m_VertexBufferView.StrideInBytes = sizeof(Vertex);
-    m_VertexBufferView.SizeInBytes = vertexBufferSize;
+    m_VertexBufferView.SizeInBytes = geometry.vertexSize;
     m_IndexBufferView.BufferLocation = m_IndexBuffer->GetGPUVirtualAddress();
     m_IndexBufferView.Format = DXGI_FORMAT_R16_UINT;
-    m_IndexBufferView.SizeInBytes = indexBufferSize;
+    m_IndexBufferView.SizeInBytes = geometry.indiceSize;
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -473,10 +398,21 @@ void D3D12App::OnLoadAssets()
     ThrowIfFailed(m_CommandList->Close());
     ID3D12CommandList* ppCommandLists[] = { m_CommandList.Get() };
     m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
-    WaitForGpu();
+
 }
 
-// --- 更新 (大改) ---
+// --- 加载资源 (同前) ---
+void D3D12App::OnLoadAssets()
+{
+    CreateRootSignature();
+    shaderCompiler.CompileShader();
+    CreatePSO();
+    CreateResources();
+    RunCommand();
+    WaitForGpu();
+    resourceManager.ClearTmpBuffers();
+}
+
 void D3D12App::OnUpdate(float deltaTime)
 {
     // 1. 更新摄像机
@@ -500,11 +436,8 @@ void D3D12App::OnUpdate(float deltaTime)
     memcpy(m_pConstantBufferDataBegin, &m_Constants, sizeof(SceneConstants));
 }
 
-
-// --- 渲染 (同前) ---
 void D3D12App::OnRender()
 {
-    // ... (同前, 100% 未修改) ...
     PopulateCommandList();
     ID3D12CommandList* ppCommandLists[] = { m_CommandList.Get() };
     m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
@@ -512,37 +445,32 @@ void D3D12App::OnRender()
     WaitForGpu();
 }
 
-// --- 填充命令列表 (同前) ---
+
+// --- 填充命令列表 ---
 void D3D12App::PopulateCommandList()
 {
-    // ... (同前, 100% 未修改) ...
-    ThrowIfFailed(m_CommandAllocator->Reset());
-    ThrowIfFailed(m_CommandList->Reset(m_CommandAllocator.Get(), m_PipelineState.Get()));
-    m_CommandList->SetGraphicsRootSignature(m_RootSignature.Get());
-    m_CommandList->RSSetViewports(1, &m_Viewport);
-    m_CommandList->RSSetScissorRects(1, &m_ScissorRect);
-    ID3D12DescriptorHeap* ppHeaps[] = { m_SrvHeap.Get() };
-    m_CommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
-    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        m_RenderTargets[m_FrameIndex].Get(),
-        D3D12_RESOURCE_STATE_PRESENT,
-        D3D12_RESOURCE_STATE_RENDER_TARGET
-    );
-    m_CommandList->ResourceBarrier(1, &barrier);
+    dx12Object.RestCommandList(m_CommandAllocator)
+        .SetRootSignature(m_RootSignature)
+        .SetPSO(psoContainer.GetPSO(RenderQueue::Common))
+        .SetViewAndSSetViewports(m_Viewport, m_ScissorRect)
+        .SetResourceBarrier(m_RenderTargets[m_FrameIndex], D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RtvHeap->GetCPUDescriptorHandleForHeapStart());
     rtvHandle.Offset(m_FrameIndex, m_RtvDescriptorSize);
     CD3DX12_CPU_DESCRIPTOR_HANDLE dsvHandle(m_DsvHeap->GetCPUDescriptorHandleForHeapStart());
     m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
-    const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
+    const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
     m_CommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
     m_CommandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    m_CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    m_CommandList->IASetVertexBuffers(0, 1, &m_VertexBufferView);
-    m_CommandList->IASetIndexBuffer(&m_IndexBufferView);
+
+
+    dx12Object.SetIA(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST, m_VertexBufferView, m_IndexBufferView);
+
+
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress());
-    m_CommandList->SetGraphicsRootDescriptorTable(1, m_SrvHeap->GetGPUDescriptorHandleForHeapStart());
+    dx12Object.SetRootSignatureDescriptorTable({ m_SrvHeap.Get() }, { 1 });
+
     m_CommandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
-    barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
         m_RenderTargets[m_FrameIndex].Get(),
         D3D12_RESOURCE_STATE_RENDER_TARGET,
         D3D12_RESOURCE_STATE_PRESENT
@@ -550,6 +478,10 @@ void D3D12App::PopulateCommandList()
     m_CommandList->ResourceBarrier(1, &barrier);
     ThrowIfFailed(m_CommandList->Close());
 }
+
+
+
+
 
 
 // --- 同步 (同前) ---
@@ -565,6 +497,13 @@ void D3D12App::WaitForGpu()
         WaitForSingleObject(m_FenceEvent, INFINITE);
     }
     m_FrameIndex = m_SwapChain->GetCurrentBackBufferIndex();
+}
+
+void D3D12App::RunCommand()
+{
+    m_CommandList->Close();
+    ID3D12CommandList* ppCommandLists[] = { m_CommandList.Get() };
+    m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
 }
 
 // --- 清理 (同前) ---

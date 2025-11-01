@@ -155,6 +155,8 @@ d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
   <ItemGroup>
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="D3D12App.cpp" />
+    <ClCompile Include="DX12Object.cpp" />
+    <ClCompile Include="Geometry.cpp" />
     <ClCompile Include="Main.cpp" />
     <ClCompile Include="PCH.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
@@ -162,12 +164,21 @@ d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <PrecompiledHeaderFile Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">PCH.h</PrecompiledHeaderFile>
       <PrecompiledHeaderFile Condition="'$(Configuration)|$(Platform)'=='Release|x64'">PCH.h</PrecompiledHeaderFile>
     </ClCompile>
+    <ClCompile Include="PSOContainer.cpp" />
+    <ClCompile Include="ResourceManager.cpp" />
+    <ClCompile Include="ShaderCompiler.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Camera.h" />
     <ClInclude Include="D3D12App.h" />
     <ClInclude Include="d3dx12.h" />
+    <ClInclude Include="DX12Object.h" />
+    <ClInclude Include="Enum.h" />
+    <ClInclude Include="Geometry.h" />
     <ClInclude Include="PCH.h" />
+    <ClInclude Include="PSOContainer.h" />
+    <ClInclude Include="ResourceManager.h" />
+    <ClInclude Include="ShaderCompiler.h" />
     <ClInclude Include="stb_image.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

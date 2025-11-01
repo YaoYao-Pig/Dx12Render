@@ -2,8 +2,12 @@
 #pragma once
 
 #include "PCH.h"
+#include "PSOContainer.h"
+#include "ShaderCompiler.h"
 #include "Camera.h" // ** 新增: 包含 Camera.h **
-
+#include "Geometry.h"
+#include "ResourceManager.h"
+#include "DX12Object.h"
 class D3D12App
 {
 public:
@@ -15,6 +19,12 @@ public:
 protected:
     void InitWindow();
     void InitD3D12();
+    virtual void CreateDescriptorHeaps();
+    virtual void CreateRootSignature();
+    virtual void CreatePSO();
+    virtual void CreateResources();
+
+    void RunCommand();
     void Cleanup();
     void WaitForGpu();
     void PopulateCommandList();
@@ -47,7 +57,6 @@ protected:
     D3D12_VIEWPORT m_Viewport;
     D3D12_RECT m_ScissorRect;
     ComPtr<ID3D12RootSignature> m_RootSignature;
-    ComPtr<ID3D12PipelineState> m_PipelineState;
     ComPtr<ID3D12Resource> m_VertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_VertexBufferView;
     ComPtr<ID3D12Resource> m_IndexBuffer;
@@ -74,17 +83,15 @@ protected:
     POINT m_LastMousePos;
 
     // ... (顶点结构体 - 同前) ...
-    struct Vertex { float position[3]; float color[4]; float texCoord[2]; float normal[3]; };
+    
+
+    Geometry geometry;
+    ShaderCompiler shaderCompiler;
+    PSOContainer psoContainer;
+    ResourceManager resourceManager;
+
+    DX12Object dx12Object;
 
 private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    inline void ThrowIfFailed(HRESULT hr)
-    {
-        if (FAILED(hr))
-        {
-            _com_error err(hr);
-            OutputDebugString(err.ErrorMessage());
-            throw std::runtime_error("D3D12 Error");
-        }
-    }
 };
