@@ -108,13 +108,13 @@ PSInput VSMain(VSInput input)
 {
     PSInput output;
     
-    // 1. 转换到摄像机裁剪空间 (用于光栅化)
+    // 转换到摄像机裁剪空间 (用于光栅化)
     output.position = mul(wvpMatrix, float4(input.position, 1.0f));
     
-    // 2. 转换到光源裁剪空间 (用于阴影采样)
+    // 转换到光源裁剪空间 (用于阴影采样)
     output.lightSpacePos = mul(lightWvpMatrix, float4(input.position, 1.0f));
 
-    // 3. 传递其他数据
+    //传递其他数据
     output.color = input.color;
     output.texcoord = input.texcoord;
 
@@ -125,10 +125,7 @@ PSInput VSMain(VSInput input)
 // 主通道 - 像素着色器
 float4 PSMain(PSInput input) : SV_Target
 {
-    // 1. 获取基础颜色
-    // ** 修复 1: 使用顶点颜色 (input.color) **
-    //    你之前为平台(Plane)设置的顶点颜色是白色，
-    //    所以这将完全满足你的要求："平台就让他是白色的就可以了"
+    // 获取基础颜色
     float4 baseColor = input.color;
     if (textureInfo.x == 1.0f)
     {
@@ -140,11 +137,8 @@ float4 PSMain(PSInput input) : SV_Target
         // 使用顶点颜色
         baseColor = input.color;
     }
-    // (我们暂时禁用纹理采样，以优先使用顶点颜色)
-    // float4 baseColor = g_Texture.Sample(g_SamplerLinear, input.texcoord);
-    
 
-    // 2. 计算阴影 (这部分代码不变)
+    // 计算阴影
     float shadowFactor = 1.0;
 
     float3 lightNdc = input.lightSpacePos.xyz / input.lightSpacePos.w;
@@ -161,16 +155,15 @@ float4 PSMain(PSInput input) : SV_Target
     }
 
 
-    // 3. 组合最终颜色
+    // 组合最终颜色
     //    这可以确保即使物体处于阴影中 (shadowFactor = 0.0)，
-    //    它也不会是纯黑色，从而解决了"黑盒子"问题。
     float3 ambientLight = float3(0.2f, 0.2f, 0.2f); // 20% 的基础亮度
 
     // - 被照亮时: (0.2 + 1.0) * baseColor -> 超过 1.0
     // - 在阴影时: (0.2 + 0.0) * baseColor -> 0.2 * baseColor (深灰色)
     float3 finalColor = baseColor.rgb * (ambientLight + shadowFactor);
     
-    // 使用 saturate() 来防止颜色 "过曝" (超过 1.0)
+    // 使用 saturate() 来防止颜色过曝
     finalColor = saturate(finalColor);
 
     return float4(finalColor, baseColor.a);

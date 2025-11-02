@@ -704,18 +704,17 @@ void D3D12App::RenderShadowMap()
 // --- 填充命令列表 ---
 void D3D12App::RenderMainPass()
 {
-    // ** 1. 设置主通道 PSO **
-    // (命令列表已由 RenderShadowMap 重置)
+    // 设置主通道 PSO
     m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Common));
 
-    // ** 2. 设置主根签名 **
+    // 设置主根签名
     m_CommandList->SetGraphicsRootSignature(m_RootSignature.Get());
 
-    // ** 3. 设置视口和裁剪矩形 (主摄像机) **
+    // 设置视口和裁剪矩形 (主摄像机)
     m_CommandList->RSSetViewports(1, &m_Viewport);
     m_CommandList->RSSetScissorRects(1, &m_ScissorRect);
 
-    // ** 4. 资源屏障 (Render Target) **
+    // 资源屏障 (Render Target)
     auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
         m_RenderTargets[m_FrameIndex].Get(),
         D3D12_RESOURCE_STATE_PRESENT,
@@ -723,20 +722,20 @@ void D3D12App::RenderMainPass()
     );
     m_CommandList->ResourceBarrier(1, &barrier);
 
-    // ** 5. 设置主渲染目标 (RTV 和 DSV) **
+    // 设置主渲染目标 (RTV 和 DSV) 
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RtvHeap->GetCPUDescriptorHandleForHeapStart());
     rtvHandle.Offset(m_FrameIndex, m_RtvDescriptorSize);
     CD3DX12_CPU_DESCRIPTOR_HANDLE dsvHandle(m_DsvHeap->GetCPUDescriptorHandleForHeapStart()); // (主 DSV 在 Slot 0)
     m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
-    // ** 6. 清除 RTV 和 DSV **
+    // 清除 RTV 和 DSV
     const float clearColor[] = { 0.1f, 0.2f, 0.4f, 1.0f };
     m_CommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
     m_CommandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    // ** 9. 绑定描述符堆 **
-    // (SRV 堆现在包含 Texture 和 ShadowMap)
-    // (Const 堆包含 Light)
-    // (Slot 1 现在指向包含 2 个描述符的表：t0=Texture, t1=ShadowMap)
+    //  绑定描述符堆 
+    // SRV 堆现在包含 Texture 和 ShadowMap
+    // Const 堆包含 Light)
+    // Slot 1 现在指向包含 2 个描述符的表：t0=Texture, t1=ShadowMap
     ID3D12DescriptorHeap* srvHeap[] = { m_SrvHeap.Get() };
     m_CommandList->SetDescriptorHeaps(_countof(srvHeap), srvHeap);
     m_CommandList->SetGraphicsRootDescriptorTable(1, m_SrvHeap->GetGPUDescriptorHandleForHeapStart());
@@ -748,8 +747,8 @@ void D3D12App::RenderMainPass()
     m_CommandList->SetGraphicsRootDescriptorTable(2, m_ConstHeap->GetGPUDescriptorHandleForHeapStart());
 
 
-    // ** --- 1. 绘制立方体 --- **
-    // 1a. 为立方体更新主CBV
+    // --- 绘制立方体 ---
+    // 为立方体更新主CBV
     XMMATRIX cubeWorld = XMLoadFloat4x4(&m_CubeWorldMatrix);
     XMMATRIX view = m_Camera.GetViewMatrix();
     XMMATRIX proj = m_Camera.GetProjMatrix();
@@ -765,15 +764,15 @@ void D3D12App::RenderMainPass()
     m_Constants.textureInfo.x = 1.0f;
     memcpy(m_pConstantBufferDataBegin, &m_Constants, sizeof(SceneConstants));
 
-    // 1b. 绑定立方体的数据并绘制
+    // 绑定立方体的数据并绘制
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress());
     m_CommandList->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_CommandList->IASetVertexBuffers(0, 1, &m_VertexBufferView);
     m_CommandList->IASetIndexBuffer(&m_IndexBufferView);
     m_CommandList->DrawIndexedInstanced(36, 1, 0, 0, 0); // 立方体
 
-    // ** --- 2. 绘制平面 --- **
-    // 2a. 为平面更新主CBV
+    // --- 绘制平面 --- 
+    // 为平面更新主CBV
     XMMATRIX planeWorld = XMLoadFloat4x4(&m_PlaneWorldMatrix);
 
     wvp = planeWorld * view * proj;
@@ -783,15 +782,15 @@ void D3D12App::RenderMainPass()
     XMStoreFloat4x4(&m_Constants.worldMatrix, planeWorld);
     XMStoreFloat4x4(&m_Constants.lightWvpMatrix, lightWvp);
     m_Constants.textureInfo.x = 0.0f;
-    memcpy(m_pConstantBufferDataBegin + c_alignedSceneConstantBufferSize, &m_Constants, sizeof(SceneConstants));
+    memcpy(m_pConstantBufferDataBegin + c_alignedSceneConstantBufferSize * 1, &m_Constants, sizeof(SceneConstants));
 
-    // 2b. 绑定平面的数据并绘制
-    m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress() + c_alignedSceneConstantBufferSize);
+    // 绑定平面的数据并绘制
+    m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress() + c_alignedSceneConstantBufferSize * 1);
     m_CommandList->IASetVertexBuffers(0, 1, &m_PlaneVertexBufferView);
     m_CommandList->IASetIndexBuffer(&m_PlaneIndexBufferView);
     m_CommandList->DrawIndexedInstanced(6, 1, 0, 0, 0); // 平面
 
-    // ** 12. 资源屏障 (Present) **
+    // 资源屏障 (Present)
     barrier = CD3DX12_RESOURCE_BARRIER::Transition(
         m_RenderTargets[m_FrameIndex].Get(),
         D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -799,7 +798,7 @@ void D3D12App::RenderMainPass()
     );
     m_CommandList->ResourceBarrier(1, &barrier);
 
-    // ** 13. 关闭命令列表 **
+    //关闭命令列表
     ThrowIfFailed(m_CommandList->Close());
 }
 
@@ -825,10 +824,8 @@ void D3D12App::RunCommand()
     m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
 }
 
-// --- 清理 (同前) ---
 void D3D12App::Cleanup()
 {
-    // ... (同前, 100% 未修改) ...
     WaitForGpu(); WaitForGpu();
     if (m_pConstantBufferDataBegin)
     {
