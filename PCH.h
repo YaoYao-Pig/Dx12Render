@@ -11,13 +11,15 @@
 #include <algorithm>
 #include <wrl.h> 
 #include <comdef.h> 
+#include <memory>
 
 
 
 #include<functional>
 enum class RenderQueue
 {
-	Common = 1
+	Common = 1,
+	Shadow
 };
 namespace std {
 	template <>

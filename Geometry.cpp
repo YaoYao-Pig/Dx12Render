@@ -1,7 +1,7 @@
 #include "PCH.h"
 #include "Geometry.h"
 
-void Geometry::LoadGeometry()
+void Geometry::LoadCubeGeometry()
 {
 	vertexs = std::vector<Vertex>{
         { { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f }, { 0.0f, 0.0f, -1.0f } },
@@ -30,6 +30,7 @@ void Geometry::LoadGeometry()
         { {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f, 0.0f } }
     };
 
+
     indices = std::vector<WORD>{
         0, 1, 2, 0, 2, 3,
         4, 5, 6, 4, 6, 7,
@@ -42,4 +43,23 @@ void Geometry::LoadGeometry()
     vertexSize = sizeof(Vertex) * vertexs.size();
     indiceSize = sizeof(WORD) * indices.size();
     
+}
+
+void Geometry::LoadPlaneGeometry()
+{
+    // 定义一个平面 (一个大的四边形)，法线朝上 (+Y)
+    planeVertexs = std::vector<Vertex>{
+        { { -1.0f, 0.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}},
+        { {-1.0f, 0.0f,  1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {0.0f, 0.0f}, {0.0f, 1.0f, 0.0f} },
+        { {1.0f, 0.0f,  1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 1.0f, 0.0f} },
+        { {1.0f, 0.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, {0.0f, 1.0f, 0.0f} }
+    };
+
+    planeIndices = std::vector<WORD>{
+        0, 1, 2, // 第一个三角形
+        0, 2, 3  // 第二个三角形
+    };
+
+    planeVertexSize = (UINT)planeVertexs.size() * sizeof(Vertex);
+    planeIndiceSize = (UINT)planeIndices.size() * sizeof(uint16_t);
 }

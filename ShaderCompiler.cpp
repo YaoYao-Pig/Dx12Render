@@ -1,61 +1,87 @@
+// ShaderCompiler.cpp
 #include "PCH.h"
 #include "ShaderCompiler.h"
 
-ShaderCompiler::ShaderCompiler()
+// ** (!!!) 确保你删除了这里所有的 ConvertWideToNarrow 函数 (!!!) **
+
+
+// ** 修改: 参数变为 const char* **
+void ShaderCompiler::Init(std::vector<const char*> entryPoints) {
+    m_EntryPoints = entryPoints;
+}
+
+// ** 修改: 参数变为 const char* **
+void ShaderCompiler::AddShaderEntryPoints(std::vector<const char*> entryPoints)
 {
-    vertexShaderCode = R"(
-        cbuffer SceneConstants : register(b0) { float4x4 g_WVP; float4x4 g_World; };
-        cbuffer lightConstants : register(b1) { float3 lightPos; float3 lightDir; };
-        struct VS_INPUT { float3 pos : POSITION; float4 color : COLOR; float2 tex : TEXCOORD; float3 normal : NORMAL; };
-        struct VS_OUTPUT { float4 pos : SV_POSITION; float4 color : COLOR; float2 tex : TEXCOORD; float3 normal_world : NORMAL; };
-        VS_OUTPUT VSMain(VS_INPUT input)
-        {
-            VS_OUTPUT output;
-            output.pos = mul(g_WVP, float4(input.pos, 1.0f));
-            output.normal_world = normalize(mul((float3x3)g_World, input.normal));
-            output.color = input.color;
-            output.tex = input.tex;
-            return output;
+    m_EntryPoints.insert(m_EntryPoints.end(), entryPoints.begin(), entryPoints.end());
+}
+
+// ** 修改: 参数变为 const char* **
+ComPtr<ID3DBlob> ShaderCompiler::GetShader(const char* name)
+{
+    // ** 修改: 这是一个简单、安全的 const char* -> std::string 转换 **
+    std::string key(name);
+
+    if (m_Shaders.find(key) != m_Shaders.end())
+    {
+        return m_Shaders[key];
+    }
+    return nullptr;
+}
+
+// ** 修改: CompileShader 函数 **
+void ShaderCompiler::CompileShader() {
+#if defined(_DEBUG)
+    UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+    UINT compileFlags = 0;
+#endif
+
+    // ** 修改: 遍历 const char* **
+    for (const char* entryPoint : m_EntryPoints)
+    {
+        ComPtr<ID3DBlob> shaderBlob;
+        ComPtr<ID3DBlob> errorBlob;
+
+        // ** 修改: 全部使用 std::string **
+        std::string entryPointStr(entryPoint);
+        std::string target;
+
+        // ** 修改: 使用窄字符串 "VS" 和 "PS" **
+        if (entryPointStr.find("VS") != std::string::npos) {
+            target = "vs_5_0";
         }
-    )";
-    pixelShaderCode = R"(
-        Texture2D g_Texture : register(t0);
-        SamplerState g_Sampler : register(s0);
-        struct PS_INPUT { float4 pos : SV_POSITION; float4 color : COLOR; float2 tex : TEXCOORD; float3 normal_world : NORMAL; };
-        float4 PSMain(PS_INPUT input) : SV_TARGET 
-        {
-            float3 lightDir = normalize(float3(0.5f, -0.8f, -1.0f));
-            float3 lightColor = float3(1.0f, 1.0f, 0.9f);
-            float ambient = 0.1f;
-            float diffuse = saturate(dot(input.normal_world, -lightDir));
-            float4 texColor = g_Texture.Sample(g_Sampler, input.tex);
-            float3 finalColor = texColor.rgb * input.color.rgb;
-            finalColor = finalColor * (ambient + (diffuse * lightColor));
-            return float4(finalColor, texColor.a);
+        else if (entryPointStr.find("PS") != std::string::npos) {
+            target = "ps_5_0";
         }
-    )";
-    vertexShaderCodeLen = vertexShaderCode.size();
-    pixelShaderCodeLen = pixelShaderCode.size();
+        else {
+            target = "ps_5_0"; // 默认
+        }
+
+        // ** 关键: **
+        // pFileName *必须* 是 LPCWSTR (宽字符)
+        // pEntrypointName 和 pTarget *必须* 是 LPCSTR (窄字符)
+        // 我们现在不再需要任何转换！
+        HRESULT hr = D3DCompileFromFile(
+            L"shaders.hlsl",             // 1. (宽) 文件名, 我们保持L"..."
+            nullptr,
+            D3D_COMPILE_STANDARD_FILE_INCLUDE,
+            entryPointStr.c_str(),       // 2. (窄) 入口点, 直接使用 .c_str()
+            target.c_str(),              // 3. (窄) 目标, 直接使用 .c_str()
+            compileFlags,
+            0,
+            &shaderBlob,
+            &errorBlob
+        );
+
+        if (FAILED(hr)) {
+            if (errorBlob) {
+                OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+            }
+            ThrowIfFailed(hr);
+        }
+
+        // ** 修改: 使用 std::string 作为键 **
+        m_Shaders[entryPointStr] = shaderBlob;
+    }
 }
-
-void ShaderCompiler::CompileShader()
-{
-    D3DCompile(GetVertexShaderCode(), vertexShaderCodeLen, nullptr, nullptr, nullptr,
-        entryPoint[0].c_str(), "vs_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0,
-        &vertexShader, &vertexShaderError);
-
-    D3DCompile(GetPixelShaderCode(), pixelShaderCodeLen, nullptr, nullptr, nullptr,
-        entryPoint[1].c_str(), "ps_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0,
-        &pixelShader, &pixelShaderError);
-}
-
-const char* ShaderCompiler::GetVertexShaderCode()
-{
-    return vertexShaderCode.c_str();
-}
-
-const char* ShaderCompiler::GetPixelShaderCode()
-{
-    return pixelShaderCode.c_str();
-}
-

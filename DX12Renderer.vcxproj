@@ -168,6 +168,7 @@ d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     <ClCompile Include="PSOContainer.cpp" />
     <ClCompile Include="ResourceManager.cpp" />
     <ClCompile Include="ShaderCompiler.cpp" />
+    <ClCompile Include="ShadowMap.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Camera.h" />
@@ -181,6 +182,7 @@ d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     <ClInclude Include="PSOContainer.h" />
     <ClInclude Include="ResourceManager.h" />
     <ClInclude Include="ShaderCompiler.h" />
+    <ClInclude Include="ShadowMap.h" />
     <ClInclude Include="stb_image.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

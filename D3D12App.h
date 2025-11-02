@@ -9,6 +9,7 @@
 #include "ResourceManager.h"
 #include "DX12Object.h"
 #include "Light.h"
+#include "ShadowMap.h"
 class D3D12App
 {
 public:
@@ -28,7 +29,8 @@ protected:
     void RunCommand();
     void Cleanup();
     void WaitForGpu();
-    void PopulateCommandList();
+    virtual void RenderMainPass();
+    virtual void RenderShadowMap();
 
     virtual void OnLoadAssets();
     // ** 修改: OnUpdate 现在需要 deltaTime **
@@ -59,19 +61,46 @@ protected:
     D3D12_VIEWPORT m_Viewport;
     D3D12_RECT m_ScissorRect;
     ComPtr<ID3D12RootSignature> m_RootSignature;
+    ComPtr<ID3D12RootSignature> m_ShadowRootSignature; //阴影通道的根签名
+
+
     ComPtr<ID3D12Resource> m_VertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_VertexBufferView;
     ComPtr<ID3D12Resource> m_IndexBuffer;
     D3D12_INDEX_BUFFER_VIEW m_IndexBufferView;
     ComPtr<ID3D12Resource> m_Texture;
 
+    ComPtr<ID3D12Resource> m_PlaneVertexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW m_PlaneVertexBufferView;
+    ComPtr<ID3D12Resource> m_PlaneIndexBuffer;
+    D3D12_INDEX_BUFFER_VIEW m_PlaneIndexBufferView;
+
+
     // ... (常量缓冲区 - 同前) ...
     ComPtr<ID3D12Resource> m_ConstantBuffer;
     ComPtr<ID3D12Resource> m_LightConstantBuffer;
     UINT8* m_pConstantBufferDataBegin;
     UINT8* m_lightConstBufferDataBegin;
-    struct SceneConstants { XMFLOAT4X4 wvpMatrix; XMFLOAT4X4 worldMatrix; float padding[32]; };
+    struct SceneConstants 
+    { 
+        XMFLOAT4X4 wvpMatrix; 
+        XMFLOAT4X4 worldMatrix; 
+        XMFLOAT4X4 lightWvpMatrix;
+        XMFLOAT4 textureInfo;
+    };
     SceneConstants m_Constants;
+
+    //  阴影通道的常量缓冲区
+    // 这个缓冲区只包含光源的 WVP，用于渲染到阴影贴图
+    ComPtr<ID3D12Resource> m_ShadowConstantBuffer;
+    UINT8* m_pShadowConstantBufferDataBegin;
+    struct ShadowConstants
+    {
+        XMFLOAT4X4 lightWvpMatrix; // 光源 WVP
+        float padding[48];         // 填充到 256 字节
+    };
+    ShadowConstants m_ShadowConstants;
+
 
     // ... (同步 - 同前) ...
     ComPtr<ID3D12Fence> m_Fence;
@@ -93,6 +122,17 @@ protected:
     DX12Object dx12Object;
 
     Light light;
+
+
+    std::unique_ptr<ShadowMap> m_ShadowMap;
+    XMFLOAT4X4 m_LightViewMatrix;
+    XMFLOAT4X4 m_LightProjMatrix;
+
+    XMFLOAT4X4 m_CubeWorldMatrix;
+    XMFLOAT4X4 m_PlaneWorldMatrix;
+
+    const UINT c_alignedSceneConstantBufferSize = (sizeof(D3D12App::SceneConstants) + 255) & ~255;
+    const UINT c_alignedShadowConstantBufferSize = (sizeof(D3D12App::ShadowConstants) + 255) & ~255;
 
 private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);

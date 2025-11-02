@@ -13,5 +13,15 @@ public:
 
 	UINT vertexSize;
 	UINT indiceSize;
-	void LoadGeometry();
+
+	std::vector<Vertex> planeVertexs;
+	std::vector<uint16_t> planeIndices;
+	UINT planeVertexSize = 0;
+	UINT planeIndiceSize = 0;
+	void LoadCubeGeometry();
+	void LoadPlaneGeometry();
+	void LoadGeometry() {
+		LoadCubeGeometry();
+		LoadPlaneGeometry();
+	}
 };
