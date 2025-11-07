@@ -4,12 +4,13 @@
 #include "PCH.h"
 #include "PSOContainer.h"
 #include "ShaderCompiler.h"
-#include "Camera.h" // ** 新增: 包含 Camera.h **
+#include "Camera.h"
 #include "Geometry.h"
 #include "ResourceManager.h"
 #include "DX12Object.h"
 #include "Light.h"
 #include "ShadowMap.h"
+#include "stb_image.h"
 class D3D12App
 {
 public:
@@ -31,9 +32,11 @@ protected:
     void WaitForGpu();
     virtual void RenderMainPass();
     virtual void RenderShadowMap();
-
+    void GenerateMipMap(void* pData, int textureWidth, int textureHeight, int mipMapLevels, std::vector<stbi_uc*>& mipDataBuffers, int texturePixelSize);
+    void LoadTextureFromFile(const char* filename,
+        ComPtr<ID3D12Resource>& textureResource,
+        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle);
     virtual void OnLoadAssets();
-    // ** 修改: OnUpdate 现在需要 deltaTime **
     virtual void OnUpdate(float deltaTime);
     virtual void OnRender();
 
@@ -43,7 +46,6 @@ protected:
     UINT m_Height;
     std::wstring m_Title;
 
-    // ... (D3D12 核心, 堆, 深度缓冲 - 同前) ...
     ComPtr<ID3D12Device> m_Device;
     ComPtr<ID3D12CommandQueue> m_CommandQueue;
     ComPtr<IDXGISwapChain3> m_SwapChain;
@@ -57,7 +59,6 @@ protected:
     UINT m_RtvDescriptorSize;
     ComPtr<ID3D12Resource> m_DepthStencilBuffer;
 
-    // ... (管线, 几何体, 纹理 - 同前) ...
     D3D12_VIEWPORT m_Viewport;
     D3D12_RECT m_ScissorRect;
     ComPtr<ID3D12RootSignature> m_RootSignature;
@@ -68,25 +69,21 @@ protected:
     D3D12_VERTEX_BUFFER_VIEW m_VertexBufferView;
     ComPtr<ID3D12Resource> m_IndexBuffer;
     D3D12_INDEX_BUFFER_VIEW m_IndexBufferView;
-    ComPtr<ID3D12Resource> m_Texture;
 
     ComPtr<ID3D12Resource> m_PlaneVertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_PlaneVertexBufferView;
     ComPtr<ID3D12Resource> m_PlaneIndexBuffer;
     D3D12_INDEX_BUFFER_VIEW m_PlaneIndexBufferView;
 
-
-    // ... (常量缓冲区 - 同前) ...
     ComPtr<ID3D12Resource> m_ConstantBuffer;
-    ComPtr<ID3D12Resource> m_LightConstantBuffer;
     UINT8* m_pConstantBufferDataBegin;
-    UINT8* m_lightConstBufferDataBegin;
     struct SceneConstants 
     { 
         XMFLOAT4X4 wvpMatrix; 
         XMFLOAT4X4 worldMatrix; 
         XMFLOAT4X4 lightWvpMatrix;
         XMFLOAT4 textureInfo;
+        XMFLOAT4 eyePos; //摄像机位置 (用于 PBR)
     };
     SceneConstants m_Constants;
 
@@ -101,14 +98,12 @@ protected:
     };
     ShadowConstants m_ShadowConstants;
 
-
-    // ... (同步 - 同前) ...
     ComPtr<ID3D12Fence> m_Fence;
     UINT64 m_FenceValue;
     HANDLE m_FenceEvent;
     UINT m_FrameIndex;
 
-    float m_TotalTime; // (现在只用于立方体旋转)
+    float m_TotalTime;
     Camera m_Camera;
     InputState m_InputState;
     POINT m_LastMousePos;
@@ -121,8 +116,10 @@ protected:
 
     DX12Object dx12Object;
 
-    Light light;
-
+    //灯光
+    ComPtr<ID3D12Resource> m_LightingConstantBuffer;
+    UINT8* m_pLightingConstantBufferDataBegin;
+    LightingConstants m_LightingConstants;
 
     std::unique_ptr<ShadowMap> m_ShadowMap;
     XMFLOAT4X4 m_LightViewMatrix;
@@ -131,9 +128,21 @@ protected:
     XMFLOAT4X4 m_CubeWorldMatrix;
     XMFLOAT4X4 m_PlaneWorldMatrix;
 
+    XMFLOAT3 m_BaseDirLightDirection;
+
     const UINT c_alignedSceneConstantBufferSize = (sizeof(D3D12App::SceneConstants) + 255) & ~255;
     const UINT c_alignedShadowConstantBufferSize = (sizeof(D3D12App::ShadowConstants) + 255) & ~255;
 
+    //PBR
+    ComPtr<ID3D12Resource> m_AlbedoTexture;    // t0
+    ComPtr<ID3D12Resource> m_MetallicTexture;  // t1
+    ComPtr<ID3D12Resource> m_RoughnessTexture; // t2
+    ComPtr<ID3D12Resource> m_AoTexture;        // t3
+    ComPtr<ID3D12Resource> m_NormalTexture;    // t4
+
+  
+
 private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    std::string m_pbr_text_tail = ".jpg";
 };

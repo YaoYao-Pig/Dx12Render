@@ -157,7 +157,6 @@ d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     <ClCompile Include="D3D12App.cpp" />
     <ClCompile Include="DX12Object.cpp" />
     <ClCompile Include="Geometry.cpp" />
-    <ClCompile Include="Light.cpp" />
     <ClCompile Include="Main.cpp" />
     <ClCompile Include="PCH.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
@@ -184,6 +183,7 @@ d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     <ClInclude Include="ShaderCompiler.h" />
     <ClInclude Include="ShadowMap.h" />
     <ClInclude Include="stb_image.h" />
+    <ClInclude Include="stb_image_resize2.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

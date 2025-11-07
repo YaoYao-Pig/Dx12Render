@@ -28,6 +28,9 @@ public:
     // 获取矩阵
     XMMATRIX GetViewMatrix() const;
     XMMATRIX GetProjMatrix() const;
+    XMFLOAT3 GetPosition() { return m_Position; }
+    XMFLOAT3 GetLookAt() { return m_Look; }
+
 
     // 核心更新函数
     void Update(float deltaTime, const InputState& input);

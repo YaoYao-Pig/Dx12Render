@@ -1,10 +1,11 @@
 #pragma once
 #include "PCH.h"
 struct Vertex { 
-	float position[3]; 
-	float color[4];
-	float texCoord[2]; 
-	float normal[3]; 
+	XMFLOAT3 position;
+	XMFLOAT4 color;
+	XMFLOAT2 texcoord;
+	XMFLOAT3 normal;
+	XMFLOAT3 tangent;
 };
 class Geometry {
 public:
