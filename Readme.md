@@ -302,6 +302,165 @@ void D3D12App::CreateRootSignature()
 
 ![image-20251107214729790](assets/image-20251107214729790.png)
 
+其实这个问题可以用DX12的接口来做，但是我用的CPU的MipMap。实际上就是在CPU提前创建好所有的MipMap的子对象和他的图片，然后作为SubResource，创建Resource的时候直接创建好。
+
+> DX12中，Resouce就是由SubResouce组成的，只是如果不指定的话，就是存在第0个位置
+>
+> ![image-20251107220529048](assets/image-20251107220529048.png)
+
+这里要注意的是，第一MipMap的计算方法：我们最后的目的是要让最远的时候就是一个像素，每次都是切一半，所以他是一个log2N的规模缩小，知道变成长宽只有一个像素大小。因此：
+
+> ```c++
+> int maxDim = max(textureWidth, textureHeight);
+> UINT mipLevels = 1 + (UINT)floor(log2(maxDim)); // 1 + log2(max)
+> ```
+
+核心降采样用的是stbir_resize_uint8_srgb这个接口，这个接口考虑了非线性的色彩空间，大概的计算逻辑是：`ToLinear(sRGB_A) + ToLinear(sRGB_B)` -> 多相滤波-> `ToSRGB(result)(这个转换约等于pow(pixel_linear, 1.0/2.2))`
+
+> `stb_image_resize` (stbir) 是一个高质量的图像缩放库，它在缩放时（尤其是降采样）使用的是**高质量的多相滤波 (High-Quality Polyphase Filtering)**。
+>
+> - **什么是多相滤波？** 当你从 2048x2048 缩放到 1024x1024 时 (生成Mip 1)，Box降采样只会查看源图像上一个 2x2 的像素块。
+> - `stbir` 使用的默认滤波器（例如 Mitchell-Netravali 或 Catmull-Rom）会查看一个**更大的采样核 (Kernel)**，比如 4x4 或 6x6 的源像素，并应用一个复杂的加权平均。
+> - **为什么这样做？** 这样可以**极大地减少锯齿 (Aliasing)** 并保留更多的图像细节，使纹理在远处看起来更平滑、更清晰，而不会闪烁。
+>
+> 
+
+```c++
+void D3D12App::GenerateMipMap(void* pData, int textureWidth, 
+    int textureHeight, int mipMapLevels, 
+    std::vector<stbi_uc*>& mipDataBuffers,
+    int texturePixelSize = 4) {
+    stbi_uc* pTextureData = (stbi_uc *) (pData);
+    mipDataBuffers.push_back(pTextureData); //mipMap0;
+    int curWidth = textureWidth;
+    int curHeight = textureHeight;
+    for (int i = 1; i < mipMapLevels; ++i) {
+        int mipWidth = textureWidth >> i;
+        int mipHeight = textureHeight >> i;
+        stbi_uc* pMipData = (stbi_uc*)malloc(mipWidth * mipHeight * texturePixelSize);
+        if (pMipData == nullptr) { throw std::runtime_error("Failed to allocate memory for Mipmap"); }
+
+        mipDataBuffers.push_back(pMipData);
+        // 计算步长 (stride)
+        // 0 表示使用默认的 (width * 4)
+        int input_stride_bytes = 0;
+        int output_stride_bytes = 0;
+        stbir_resize_uint8_srgb(
+            mipDataBuffers[i - 1], textureWidth >> i-1, textureHeight >> i-1, 0, // Source
+            pMipData, mipWidth, mipHeight, 0,                      // Dest
+            STBIR_RGBA
+        );
+    }
+}
+```
+
+
+
+```c++
+void D3D12App::LoadTextureFromFile(
+    const char* filename, 
+    ComPtr<ID3D12Resource>& textureResource, 
+    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle)
+{
+    int textureWidth, textureHeight, textureChannels;
+    //第0级MipMap
+    stbi_uc* pTextureData = stbi_load(filename, &textureWidth, &textureHeight, &textureChannels, STBI_rgb_alpha);
+    if (pTextureData == nullptr) {
+        std::string errorMsg = "Failed to load texture file: ";
+        errorMsg += filename;
+        throw std::runtime_error(errorMsg);
+    }
+    UINT texturePixelSize = 4; // STBI_rgb_alpha
+
+    int maxDim = max(textureWidth, textureHeight);
+    UINT mipLevels = 1 + (UINT)floor(log2(maxDim)); // 1 + log2(max)
+
+    // 创建纹理资源 (Texture Resource)
+    D3D12_RESOURCE_DESC textureDesc = {};
+    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    textureDesc.Width = textureWidth;
+    textureDesc.Height = textureHeight;
+    textureDesc.DepthOrArraySize = 1;
+    textureDesc.MipLevels = mipLevels;
+    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; // STBI_rgb_alpha 强制转为 4 通道
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(m_Device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &textureDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr, IID_PPV_ARGS(&textureResource)
+    ));
+
+    std::vector<stbi_uc*> mipDataBuffers;
+    GenerateMipMap(pTextureData, textureWidth, textureHeight, mipLevels, mipDataBuffers);
+
+    //准备 Subresource 数据
+    int currentWidth = textureWidth;
+    int currentHeight = textureHeight;
+    std::vector<D3D12_SUBRESOURCE_DATA> subresources;
+    for (UINT i = 0; i < mipLevels; ++i)
+    {
+        D3D12_SUBRESOURCE_DATA subresourceData = {};
+        subresourceData.pData = mipDataBuffers[i];
+        subresourceData.RowPitch = (UINT64)currentWidth * texturePixelSize;
+        subresourceData.SlicePitch = subresourceData.RowPitch * currentHeight;
+
+        subresources.push_back(subresourceData);
+
+        currentWidth = max(1, currentWidth / 2);
+        currentHeight = max(1, currentHeight / 2);
+    }
+
+    // 获取上传缓冲区大小 (Upload Buffer Size)
+    UINT64 textureUploadBufferSize;
+    m_Device->GetCopyableFootprints(&textureDesc, 0, mipLevels, 0, nullptr, nullptr, nullptr, &textureUploadBufferSize);
+
+    // 创建上传缓冲区 (Upload Buffer)
+    ComPtr<ID3D12Resource> pTextureUploadBuffer;
+    heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(textureUploadBufferSize);
+    ThrowIfFailed(m_Device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr, IID_PPV_ARGS(&pTextureUploadBuffer)
+    ));
+    resourceManager.AddResource2TmpBuffer(pTextureUploadBuffer); // 使用你的 ResourceManager 来管理临时缓冲区
+    // 拷贝数据到纹理资源
+    UpdateSubresources(
+        m_CommandList.Get(), 
+        textureResource.Get(), 
+        pTextureUploadBuffer.Get(), 
+        0, 0, mipLevels, 
+        subresources.data());
+
+    stbi_image_free(mipDataBuffers[0]);
+    // (stbi_resize 的 Mip 1+)
+    for (UINT i = 1; i < mipLevels; ++i)
+    {
+        free(mipDataBuffers[i]);
+    }
+
+    // 创建 SRV (Shader Resource View)
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = textureDesc.Format;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = -1;
+    m_Device->CreateShaderResourceView(textureResource.Get(), &srvDesc, srvHandle);
+}
+```
+
+> UpdateSubresources在做什么：
+>
+> ![image-20251107221119695](assets/image-20251107221119695.png)
+>
+> ![image-20251107221129795](assets/image-20251107221129795.png)
+>
+> ![image-20251107221136235](assets/image-20251107221136235.png)
+
 
 
 
