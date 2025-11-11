@@ -27,6 +27,8 @@ protected:
     virtual void CreatePSO();
     virtual void CreateResources();
 
+    void LoadCubeMapTexture(std::vector<std::string> filenames, ComPtr<ID3D12Resource>& textureResource, D3D12_CPU_DESCRIPTOR_HANDLE srvHandle);
+
     void RunCommand();
     void Cleanup();
     void WaitForGpu();
@@ -149,9 +151,14 @@ protected:
     ComPtr<ID3D12Resource> m_AoTexture;        // t3
     ComPtr<ID3D12Resource> m_NormalTexture;    // t4
 
+    // --- Ìì¿ÕºÐ×ÊÔ´ ---
+    ComPtr<ID3D12Resource> m_SkyboxTexture;
+    ComPtr<ID3D12RootSignature> m_SkyboxRootSignature;
+
  private:
      void RenderOpaque(CD3DX12_RESOURCE_BARRIER* barrier);
      void RenderTransparent();
+     void RenderSkyBox();
 private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     std::string m_pbr_text_tail = ".jpg";

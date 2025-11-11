@@ -1,24 +1,11 @@
-﻿  PCH.cpp
-  Camera.cpp
-  D3D12App.cpp
-D:\Program\DX12Renderer\D3D12App.cpp(810,49): warning C4554: “>>”: 检查运算符优先级是否存在的可能的错误；使用括号阐明优先级
+﻿  D3D12App.cpp
+D:\Program\DX12Renderer\D3D12App.cpp(1011,49): warning C4554: “>>”: 检查运算符优先级是否存在的可能的错误；使用括号阐明优先级
   (编译源文件“/D3D12App.cpp”)
   
-D:\Program\DX12Renderer\D3D12App.cpp(810,71): warning C4554: “>>”: 检查运算符优先级是否存在的可能的错误；使用括号阐明优先级
+D:\Program\DX12Renderer\D3D12App.cpp(1011,71): warning C4554: “>>”: 检查运算符优先级是否存在的可能的错误；使用括号阐明优先级
   (编译源文件“/D3D12App.cpp”)
   
-D:\Program\DX12Renderer\D3D12App.cpp(1031,68): warning C4267: “参数”: 从“size_t”转换到“UINT”，可能丢失数据
+D:\Program\DX12Renderer\D3D12App.cpp(1232,68): warning C4267: “参数”: 从“size_t”转换到“UINT”，可能丢失数据
   (编译源文件“/D3D12App.cpp”)
   
-  DX12Object.cpp
-D:\Program\DX12Renderer\DX12Object.cpp(56,51): warning C4267: “参数”: 从“size_t”转换到“UINT”，可能丢失数据
-  (编译源文件“/DX12Object.cpp”)
-  
-  Geometry.cpp
-  Main.cpp
-  PSOContainer.cpp
-  ResourceManager.cpp
-  ShaderCompiler.cpp
-  ShadowMap.cpp
-  正在生成代码...
   DX12Renderer.vcxproj -> D:\Program\DX12Renderer\x64\Debug\DX12Renderer.exe

@@ -21,6 +21,7 @@ enum class RenderQueue
 	Common = 1,
 	Shadow,
 	Transparent,
+	Skybox,
 };
 namespace std {
 	template <>

@@ -397,3 +397,51 @@ float4 PSMain(PSInput input) : SV_Target
     
     return float4(finalColor, alpha);
 }
+
+
+
+
+// 天空盒着色器非常简单, 只需要一个天空盒立方体贴图
+// 它在自己的根签名中, 所以可以安全地使用 t0
+TextureCube g_SkyboxTexture : register(t0);
+SamplerState g_SamplerMainSky : register(s0);
+
+struct VSInputSky
+{
+    float3 position : POSITION;
+};
+
+struct PSInputSky
+{
+    float4 position : SV_Position; // 裁剪空间
+    float3 texcoord : TEXCOORD0; // 纹理坐标 (将是方向向量)
+};
+
+PSInputSky SkyboxVS(VSInputSky input)
+{
+    PSInputSky output;
+
+    // 计算裁剪空间位置 
+    output.position = mul(wvpMatrix, float4(input.position, 1.0f));
+
+    // 我们将 Z 坐标强制设置为 W 坐标。
+    // 在透视除法 (z/w) 之后, Z 值将恒为 1.0f。
+    // 这确保了天空盒总是在深度缓冲区的最远处1.0f
+    // 任何其他物体都会画在它前面。
+    output.position.z = output.position.w;
+
+    // 将顶点位置作为采样立方体贴图的 3D 纹理坐标
+    // 应该使用 input.position, 因为它代表了从(0,0,0)出发的方向
+    output.texcoord = input.position;
+
+    return output;
+}
+
+float4 SkyboxPS(PSInputSky input) : SV_Target
+{
+    // 使用来自VS的 3D 坐标采样立方体贴图
+    float4 skyColor = g_SkyboxTexture.Sample(g_SamplerMainSky, normalize(input.texcoord));
+    
+    // 我们稍后会在这里做 Gamma 校正, 但现在直接返回
+    return skyColor;
+}

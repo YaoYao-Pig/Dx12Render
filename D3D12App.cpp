@@ -260,6 +260,7 @@ void D3D12App::InitD3D12()
     // 其他
     shaderCompiler.Init({ "VSMain", "PSMain" });
     shaderCompiler.AddShaderEntryPoints({ "ShadowVS", "ShadowPS" }); //注册阴影着色器入口点
+    shaderCompiler.AddShaderEntryPoints({ "SkyboxVS", "SkyboxPS" });
     psoContainer.Init(m_Device);
     geometry.LoadGeometry();
     resourceManager.Init(m_Device, m_CommandList);
@@ -281,7 +282,9 @@ void D3D12App::CreateDescriptorHeaps()
      
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srvHeapDesc.NumDescriptors = 6; //(t0: Albedo, t1: Metallic, t2: Roughness, t3: AO, t4: ShadowMap, t5: NormalMap)
+    //t0: Albedo, t1: Metallic, t2: Roughness, t3: AO, t4: ShadowMap, t5: NormalMap
+    //天空盒t6,IBL贴图t7, t8, t9
+    srvHeapDesc.NumDescriptors = 10; 
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(m_Device->CreateDescriptorHeap(&srvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_SrvHeap));
 
@@ -295,9 +298,9 @@ void D3D12App::CreateDescriptorHeaps()
 
 void D3D12App::CreateRootSignature()
 {
-    //----------- 创建主渲染通道的根签名 (m_RootSignature) -----------
+    //创建主渲染通道的根签名 (m_RootSignature)
     CD3DX12_DESCRIPTOR_RANGE ranges[2];
-    ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6, 0); //t0-t5
+    ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 10, 0); //t0-t9
     ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1);// 一个cbv，存在于b1;
     CD3DX12_ROOT_PARAMETER parameters[3];
     parameters[0].InitAsConstantBufferView(0);//一个const,存在于b0: SceneConstants
@@ -345,7 +348,7 @@ void D3D12App::CreateRootSignature()
         (void**)&m_RootSignature));
 
 
-    // ----------- 创建阴影通道的根签名 (m_ShadowRootSignature) -----------
+    // 阴影通道的根签名 
     // Slot 0 (b0): ShadowConstants (只包含 Light WVP)
     CD3DX12_ROOT_PARAMETER shadowParameters[1];
     shadowParameters[0].InitAsConstantBufferView(0); // b0: ShadowConstants
@@ -359,6 +362,42 @@ void D3D12App::CreateRootSignature()
         shadowSignature->GetBufferPointer(), shadowSignature->GetBufferSize(),
         IID_PPV_ARGS(&m_ShadowRootSignature)));
     m_ShadowRootSignature->SetName(L"Shadow Root Signature");
+
+    //天空盒通道的根签名
+    CD3DX12_DESCRIPTOR_RANGE skyboxRanges[1];
+    skyboxRanges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // 1 个 SRV (t0)
+
+    CD3DX12_ROOT_PARAMETER skyboxParameters[2];
+    skyboxParameters[0].InitAsConstantBufferView(0); // b0: SkyboxConstants
+    skyboxParameters[1].InitAsDescriptorTable(1, &skyboxRanges[0]); // t0: Skybox Texture
+    // 天空盒使用我们已有的主采样器 s0
+    textureSampler = {}; 
+    textureSampler.Filter = D3D12_FILTER_ANISOTROPIC;
+    textureSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    textureSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    textureSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    textureSampler.MinLOD = 0;
+    textureSampler.MaxLOD = D3D12_FLOAT32_MAX;
+    textureSampler.ShaderRegister = 0;//s0
+    textureSampler.RegisterSpace = 0;
+    textureSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    textureSampler.MaxAnisotropy = 16;
+    D3D12_STATIC_SAMPLER_DESC skyboxSamplers[] = { textureSampler };
+
+    CD3DX12_ROOT_SIGNATURE_DESC skyboxSignatureDes = {};
+    skyboxSignatureDes.Init(_countof(skyboxParameters), skyboxParameters,
+        _countof(skyboxSamplers), skyboxSamplers,
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+    ComPtr<ID3DBlob> skyboxSignature, skyboxError;
+    ThrowIfFailed(D3D12SerializeRootSignature(&skyboxSignatureDes, D3D_ROOT_SIGNATURE_VERSION_1, &skyboxSignature, &skyboxError));
+
+    ThrowIfFailed(m_Device->CreateRootSignature(0,
+        skyboxSignature->GetBufferPointer(),
+        skyboxSignature->GetBufferSize(),
+        IID_PPV_ARGS(&m_SkyboxRootSignature)));
+    m_SkyboxRootSignature->SetName(L"Skybox Root Signature");
+
 }
 
 void D3D12App::CreatePSO()
@@ -372,7 +411,7 @@ void D3D12App::CreatePSO()
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
-    // ----------- 创建主渲染通道的 PSO (RenderQueue::Common) -----------
+    // ----------- 创建主渲染通道的 PSO (RenderQueue::Common)
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
     psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
     psoDesc.pRootSignature = m_RootSignature.Get();
@@ -407,7 +446,7 @@ void D3D12App::CreatePSO()
 
     psoContainer.BuildPSO(RenderQueue::Common, &psoDesc);
 
-    // -----------  创建阴影通道的 PSO (RenderQueue::Shadow) -----------
+    // -----------  创建阴影通道的 PSO (RenderQueue::Shadow)
     D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowPsoDesc = {};
     shadowPsoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
     shadowPsoDesc.pRootSignature = m_ShadowRootSignature.Get(); // 使用 m_ShadowRootSignature
@@ -450,7 +489,7 @@ void D3D12App::CreatePSO()
     psoContainer.BuildPSO(RenderQueue::Shadow, &shadowPsoDesc);
 
 
-    //创建透明通道的 PSO (RenderQueue::Transparent)
+    //----------创建透明通道的 PSO (RenderQueue::Transparent)
     D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = psoDesc;
     // 启用 Alpha 混合
     D3D12_BLEND_DESC transparentBlendDesc = {};
@@ -473,6 +512,52 @@ void D3D12App::CreatePSO()
     transparentPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO; // 不写入深度
 
     psoContainer.BuildPSO(RenderQueue::Transparent, &transparentPsoDesc);
+
+
+    //----------- 创建天空盒的 PSO (RenderQueue::Skybox) -----------
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC skyboxPsoDesc = {};
+    // 我们只需要 POSITION
+    D3D12_INPUT_ELEMENT_DESC skyboxInputElementDescs[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+    skyboxPsoDesc.InputLayout = { skyboxInputElementDescs, _countof(skyboxInputElementDescs) };
+    skyboxPsoDesc.pRootSignature = m_SkyboxRootSignature.Get();
+    skyboxPsoDesc.VS.pShaderBytecode = shaderCompiler.GetShader("SkyboxVS")->GetBufferPointer();
+    skyboxPsoDesc.VS.BytecodeLength = shaderCompiler.GetShader("SkyboxVS")->GetBufferSize();
+    skyboxPsoDesc.PS.pShaderBytecode = shaderCompiler.GetShader("SkyboxPS")->GetBufferPointer();
+    skyboxPsoDesc.PS.BytecodeLength = shaderCompiler.GetShader("SkyboxPS")->GetBufferSize();
+
+    // 天空盒光栅化状态: 剔除正面 因为我们在立方体内部
+    D3D12_RASTERIZER_DESC skyboxRasterizerDesc = {};
+    skyboxRasterizerDesc.FillMode = D3D12_FILL_MODE_SOLID;
+    skyboxRasterizerDesc.CullMode = D3D12_CULL_MODE_NONE; //  剔除正面
+    skyboxRasterizerDesc.FrontCounterClockwise = FALSE;
+    skyboxRasterizerDesc.DepthClipEnable = TRUE;
+    skyboxPsoDesc.RasterizerState = skyboxRasterizerDesc;
+
+    // Blend 关闭
+    D3D12_BLEND_DESC skyboxBlendDesc = {};
+    skyboxBlendDesc.AlphaToCoverageEnable = FALSE;
+    skyboxBlendDesc.IndependentBlendEnable = FALSE;
+    skyboxBlendDesc.RenderTarget[0].BlendEnable = FALSE;
+    skyboxBlendDesc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    skyboxPsoDesc.BlendState = skyboxBlendDesc;
+
+    // 天空盒深度状态:
+    skyboxPsoDesc.DepthStencilState.DepthEnable = TRUE;
+    skyboxPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO; // 不写入深度
+    // (关键) VS中 z=w 技巧需要这个
+    skyboxPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+
+    skyboxPsoDesc.SampleMask = UINT_MAX;
+    skyboxPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    skyboxPsoDesc.NumRenderTargets = 1;
+    skyboxPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    skyboxPsoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    skyboxPsoDesc.SampleDesc.Count = 1;
+
+    psoContainer.BuildPSO(RenderQueue::Skybox, &skyboxPsoDesc);
 
 }
 
@@ -512,6 +597,16 @@ void D3D12App::CreateResources()
     LoadTextureFromFile(std::string("pbr_normal" + m_pbr_text_tail).c_str(), m_NormalTexture, srvHandle);
     m_NormalTexture->SetName(L"Normal Texture");
     //t5: ShadowMap SRV 是在 InitD3D12 中创建的
+
+    // t6: Skybox Cube Map
+    std::vector<std::string> skyboxFaces = {
+        "px.png", "nx.png",
+        "py.png", "ny.png",
+        "pz.png", "nz.png"
+    };
+    LoadCubeMapTexture(skyboxFaces, m_SkyboxTexture, srvHandle);
+    m_SkyboxTexture->SetName(L"Skybox Texture");
+
 
     //阴影贴图的 SRV 是在 InitD3D12 中由 m_ShadowMap 自己创建的
     CD3DX12_RESOURCE_BARRIER barriers[11] = {
@@ -612,6 +707,112 @@ void D3D12App::CreateResources()
     ID3D12CommandList* ppCommandLists[] = { m_CommandList.Get() };
     m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
 
+}
+
+void D3D12App::LoadCubeMapTexture(
+    std::vector<std::string> filenames,
+    ComPtr<ID3D12Resource>& textureResource,
+    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle)
+{
+    if (filenames.size() != 6) {
+        throw std::runtime_error("Cube map loading requires 6 texture filenames.");
+    }
+
+    // 1. 加载 6 张图的 CPU 数据
+    std::vector<stbi_uc*> pTextureData(6);
+    int textureWidth, textureHeight, textureChannels;
+    D3D12_RESOURCE_DESC textureDesc = {};
+
+    // (假定所有6张图的尺寸和格式都一样)
+    pTextureData[0] = stbi_load(filenames[0].c_str(), &textureWidth, &textureHeight, &textureChannels, STBI_rgb_alpha);
+    if (pTextureData[0] == nullptr) throw std::runtime_error("Failed to load cubemap texture: " + filenames[0]);
+
+    for (int i = 1; i < 6; ++i) {
+        pTextureData[i] = stbi_load(filenames[i].c_str(), &textureWidth, &textureHeight, &textureChannels, STBI_rgb_alpha);
+        if (pTextureData[i] == nullptr) throw std::runtime_error("Failed to load cubemap texture: " + filenames[i]);
+    }
+
+    UINT texturePixelSize = 4; // STBI_rgb_alpha
+
+    // 2. 创建纹理资源 (Texture Resource)
+    // 这是一个 Texture2D 数组，包含 6 个元素
+    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    textureDesc.Width = textureWidth;
+    textureDesc.Height = textureHeight;
+    textureDesc.DepthOrArraySize = 6; // <-- 关键: 6 个数组切片
+    textureDesc.MipLevels = 1;        // (IBL 稍后会需要 MipLevels)
+    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(m_Device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &textureDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr, IID_PPV_ARGS(&textureResource)
+    ));
+
+    // 3. 准备 Subresource 数据 (每个数组元素是一个 Subresource)
+    std::vector<D3D12_SUBRESOURCE_DATA> subresources;
+    for (int i = 0; i < 6; ++i)
+    {
+        D3D12_SUBRESOURCE_DATA subresourceData = {};
+        subresourceData.pData = pTextureData[i];
+        subresourceData.RowPitch = (UINT64)textureWidth * texturePixelSize;
+        subresourceData.SlicePitch = subresourceData.RowPitch * textureHeight; // SlicePitch 是一个完整 2D 图像的大小
+        subresources.push_back(subresourceData);
+    }
+
+    // 4. 获取上传缓冲区大小 (Upload Buffer Size)
+    UINT64 textureUploadBufferSize;
+    // (注意: MipLevels=1, ArraySize=6)
+    m_Device->GetCopyableFootprints(&textureDesc, 0, 6, 0, nullptr, nullptr, nullptr, &textureUploadBufferSize);
+
+    // 5. 创建和映射上传缓冲区 (Upload Buffer)
+    ComPtr<ID3D12Resource> pTextureUploadBuffer;
+    heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(textureUploadBufferSize);
+    ThrowIfFailed(m_Device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr, IID_PPV_ARGS(&pTextureUploadBuffer)
+    ));
+    resourceManager.AddResource2TmpBuffer(pTextureUploadBuffer);
+
+    // 6. 拷贝数据到纹理资源
+    UpdateSubresources(
+        m_CommandList.Get(),
+        textureResource.Get(),
+        pTextureUploadBuffer.Get(),
+        0, 0, 6, // 拷贝 6 个 subresources
+        subresources.data());
+
+    // (我们还需要一个 Barrier 转换资源状态)
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        textureResource.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+    );
+    m_CommandList->ResourceBarrier(1, &barrier);
+
+    // 7. 释放 STB 加载的内存
+    for (int i = 0; i < 6; ++i)
+    {
+        stbi_image_free(pTextureData[i]);
+    }
+
+    // 8. 创建 SRV (Shader Resource View)
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = textureDesc.Format;
+    // *** 关键: 告诉 DX12 这是一个 Cube Map! ***
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    srvDesc.TextureCube.MipLevels = 1;
+    srvDesc.TextureCube.MostDetailedMip = 0;
+    srvDesc.TextureCube.ResourceMinLODClamp = 0.0f;
+
+    m_Device->CreateShaderResourceView(textureResource.Get(), &srvDesc, srvHandle);
 }
 
 //加载资源
@@ -1031,12 +1232,59 @@ void D3D12App::RenderTransparent() {
     m_CommandList->DrawIndexedInstanced(geometry.sphereIndices.size(), 1, 0, 0, 0); // 绘制球体
 }
 
+void D3D12App::RenderSkyBox() {
+    m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Skybox));
+    m_CommandList->SetGraphicsRootSignature(m_SkyboxRootSignature.Get());
+
+    // 绑定 SRV 堆 (它包含了所有 PBR 贴图和天空盒)
+    ID3D12DescriptorHeap* srvHeap[] = { m_SrvHeap.Get() };
+    m_CommandList->SetDescriptorHeaps(_countof(srvHeap), srvHeap);
+
+    // 获取天空盒的 SRV 句柄 (它在 t6, 也就是索引 6)
+    CD3DX12_GPU_DESCRIPTOR_HANDLE skyboxSrvHandle(m_SrvHeap->GetGPUDescriptorHandleForHeapStart());
+    skyboxSrvHandle.Offset(6, m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
+
+    // 天空盒根签名在 Slot 1 处需要 SRV
+    m_CommandList->SetGraphicsRootDescriptorTable(1, skyboxSrvHandle);
+
+    // (我们需要为天空盒更新常量缓冲区)
+    // 天空盒的 WVP = World * View * Proj
+    // World 只是一个以摄像机为中心的大立方体
+    XMMATRIX view = m_Camera.GetViewMatrix();
+    XMMATRIX proj = m_Camera.GetProjMatrix();
+
+    // (移除 View 矩阵的位移, 这样天空盒就会跟随摄像机)
+    view.r[3] = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+
+    XMMATRIX skyboxWvp = view * proj;
+    XMStoreFloat4x4(&m_Constants.wvpMatrix, skyboxWvp); // (我们可以复用 m_Constants)
+
+    // (使用第 4 个常量缓冲区槽位: 0=Cube, 1=Plane, 2=Sphere, 3=Skybox)
+    memcpy(m_pConstantBufferDataBegin + c_alignedSceneConstantBufferSize * 3, &m_Constants, sizeof(SceneConstants));
+
+    // 天空盒根签名在 Slot 0 处需要 CBV
+    m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress() + c_alignedSceneConstantBufferSize * 3);
+
+    // (复用 PBR 立方体的 VBO/IBO 来绘制)
+    m_CommandList->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_CommandList->IASetVertexBuffers(0, 1, &m_VertexBufferView);
+    m_CommandList->IASetIndexBuffer(&m_IndexBufferView);
+    m_CommandList->DrawIndexedInstanced(36, 1, 0, 0, 0); // 绘制立方体
+
+}
 // --- 填充命令列表 ---
 void D3D12App::RenderMainPass()
 {
     CD3DX12_RESOURCE_BARRIER barrier = {};
+    RenderSkyBox();
     RenderOpaque(&barrier);
+
     RenderTransparent();
+
+    //绘制天空盒 (Skybox Pass)
+
+
+
 
     // 资源屏障 (Present)
     barrier = CD3DX12_RESOURCE_BARRIER::Transition(
