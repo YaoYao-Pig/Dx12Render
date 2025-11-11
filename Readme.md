@@ -471,12 +471,13 @@ void D3D12App::LoadTextureFromFile(
 
 Sampler是绑定在根签名上的
 
+# 透明管线
 
+![Transport](assets/Transport.gif)
 
 # TODO
 
 1. IBL
-2. 透明管线
 3. 多模型加载封装
 4. 多光源阴影计算
 5. 模板缓冲区实现镜子效果
