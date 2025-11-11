@@ -448,6 +448,32 @@ void D3D12App::CreatePSO()
     shadowPsoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT; //必须匹配 ShadowMap的DSV格式 
     shadowPsoDesc.SampleDesc.Count = 1;
     psoContainer.BuildPSO(RenderQueue::Shadow, &shadowPsoDesc);
+
+
+    //创建透明通道的 PSO (RenderQueue::Transparent)
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = psoDesc;
+    // 启用 Alpha 混合
+    D3D12_BLEND_DESC transparentBlendDesc = {};
+    transparentBlendDesc.AlphaToCoverageEnable = FALSE;
+    transparentBlendDesc.IndependentBlendEnable = FALSE;
+    transparentBlendDesc.RenderTarget[0].BlendEnable = TRUE; // <-- 启用!
+    transparentBlendDesc.RenderTarget[0].LogicOpEnable = FALSE;
+    // Final = SrcColor * SrcAlpha + DestColor * (1 - SrcAlpha)
+    transparentBlendDesc.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    transparentBlendDesc.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    transparentBlendDesc.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    // Alpha 通道自身: FinalAlpha = SrcAlpha * 1 + DestAlpha * 0
+    transparentBlendDesc.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    transparentBlendDesc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    transparentBlendDesc.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    transparentBlendDesc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    transparentPsoDesc.BlendState = transparentBlendDesc;
+
+    transparentPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO; // 不写入深度
+
+    psoContainer.BuildPSO(RenderQueue::Transparent, &transparentPsoDesc);
+
 }
 
 void D3D12App::CreateResources()
@@ -459,6 +485,9 @@ void D3D12App::CreateResources()
     resourceManager.UploadResource(geometry.planeIndices.data(), geometry.planeIndiceSize, m_PlaneIndexBuffer);
 
     
+    resourceManager.UploadResource(geometry.sphereVertexs.data(), geometry.sphereVertexSize, m_SphereVertexBuffer);
+    resourceManager.UploadResource(geometry.sphereIndices.data(), geometry.sphereIndiceSize, m_SphereIndexBuffer);
+
     //加载各种贴图
     //获取SRVHandler起始位置
     CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_SrvHeap->GetCPUDescriptorHandleForHeapStart());
@@ -485,7 +514,7 @@ void D3D12App::CreateResources()
     //t5: ShadowMap SRV 是在 InitD3D12 中创建的
 
     //阴影贴图的 SRV 是在 InitD3D12 中由 m_ShadowMap 自己创建的
-    CD3DX12_RESOURCE_BARRIER barriers[9] = {
+    CD3DX12_RESOURCE_BARRIER barriers[11] = {
         CD3DX12_RESOURCE_BARRIER::Transition(
             m_VertexBuffer.Get(),
             D3D12_RESOURCE_STATE_COPY_DEST, //它是一个复制目标
@@ -530,6 +559,16 @@ void D3D12App::CreateResources()
             m_PlaneIndexBuffer.Get(),
             D3D12_RESOURCE_STATE_COPY_DEST,
             D3D12_RESOURCE_STATE_INDEX_BUFFER
+        ),
+        CD3DX12_RESOURCE_BARRIER::Transition(
+            m_SphereVertexBuffer.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+        ),
+        CD3DX12_RESOURCE_BARRIER::Transition(
+            m_SphereIndexBuffer.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_INDEX_BUFFER
         )
     };
 
@@ -545,10 +584,17 @@ void D3D12App::CreateResources()
     m_PlaneVertexBufferView.BufferLocation = m_PlaneVertexBuffer->GetGPUVirtualAddress();
     m_PlaneVertexBufferView.StrideInBytes = sizeof(Vertex);
     m_PlaneVertexBufferView.SizeInBytes = geometry.planeVertexSize;
-
     m_PlaneIndexBufferView.BufferLocation = m_PlaneIndexBuffer->GetGPUVirtualAddress();
     m_PlaneIndexBufferView.Format = DXGI_FORMAT_R16_UINT;
     m_PlaneIndexBufferView.SizeInBytes = geometry.planeIndiceSize;
+
+    m_SphereVertexBufferView.BufferLocation = m_SphereVertexBuffer->GetGPUVirtualAddress();
+    m_SphereVertexBufferView.StrideInBytes = sizeof(Vertex);
+    m_SphereVertexBufferView.SizeInBytes = geometry.sphereVertexSize;
+    m_SphereIndexBufferView.BufferLocation = m_SphereIndexBuffer->GetGPUVirtualAddress();
+    m_SphereIndexBufferView.Format = DXGI_FORMAT_R16_UINT;
+    m_SphereIndexBufferView.SizeInBytes = geometry.sphereIndiceSize;
+
 
    
     const UINT constantBufferSize = c_alignedSceneConstantBufferSize * 64;
@@ -650,6 +696,8 @@ void D3D12App::OnUpdate(float deltaTime)
     XMStoreFloat4x4(&m_CubeWorldMatrix, cubeWorldMatrix);
     XMMATRIX planeWorldMatrix = XMMatrixScaling(10.0f, 10.0f, 10.0f) * XMMatrixTranslation(0.0f, -0.5f, 0.0f);
     XMStoreFloat4x4(&m_PlaneWorldMatrix, planeWorldMatrix);
+    XMMATRIX sphereWorldMatrix = XMMatrixTranslation(0.0f, 1.0f + 0.2f * sinf(m_TotalTime), 0.0f);
+    XMStoreFloat4x4(&m_SphereWorldMatrix, sphereWorldMatrix);
 
     XMStoreFloat4(&m_Constants.eyePos, cameraPos);
 }
@@ -861,9 +909,8 @@ void D3D12App::LoadTextureFromFile(
     m_Device->CreateShaderResourceView(textureResource.Get(), &srvDesc, srvHandle);
 }
 
-// --- 填充命令列表 ---
-void D3D12App::RenderMainPass()
-{
+
+void D3D12App::RenderOpaque(CD3DX12_RESOURCE_BARRIER* barrier) {
     // 设置主通道 PSO
     m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Common));
 
@@ -875,12 +922,12 @@ void D3D12App::RenderMainPass()
     m_CommandList->RSSetScissorRects(1, &m_ScissorRect);
 
     // 资源屏障 (Render Target)
-    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+    *barrier = CD3DX12_RESOURCE_BARRIER::Transition(
         m_RenderTargets[m_FrameIndex].Get(),
         D3D12_RESOURCE_STATE_PRESENT,
         D3D12_RESOURCE_STATE_RENDER_TARGET
     );
-    m_CommandList->ResourceBarrier(1, &barrier);
+    m_CommandList->ResourceBarrier(1, barrier);
 
     // 设置主渲染目标 (RTV 和 DSV) 
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RtvHeap->GetCPUDescriptorHandleForHeapStart());
@@ -907,7 +954,7 @@ void D3D12App::RenderMainPass()
     m_CommandList->SetGraphicsRootDescriptorTable(2, m_ConstHeap->GetGPUDescriptorHandleForHeapStart());
 
 
-    // --- 绘制立方体 ---
+    // 绘制立方体 
     // 为立方体更新主CBV
     XMMATRIX cubeWorld = XMLoadFloat4x4(&m_CubeWorldMatrix);
     XMMATRIX view = m_Camera.GetViewMatrix();
@@ -931,7 +978,7 @@ void D3D12App::RenderMainPass()
     m_CommandList->IASetIndexBuffer(&m_IndexBufferView);
     m_CommandList->DrawIndexedInstanced(36, 1, 0, 0, 0); // 立方体
 
-    // --- 绘制平面 --- 
+    // 绘制平面
     // 为平面更新主CBV
     XMMATRIX planeWorld = XMLoadFloat4x4(&m_PlaneWorldMatrix);
 
@@ -949,6 +996,47 @@ void D3D12App::RenderMainPass()
     m_CommandList->IASetVertexBuffers(0, 1, &m_PlaneVertexBufferView);
     m_CommandList->IASetIndexBuffer(&m_PlaneIndexBufferView);
     m_CommandList->DrawIndexedInstanced(6, 1, 0, 0, 0); // 平面
+}
+
+void D3D12App::RenderTransparent() {
+
+    // 切换到透明 PSO 
+    m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Transparent));
+    // 根签名、视口、RTV/DSV、描述符堆都和 Common Pass 相同, 不需要重新绑定
+
+    // 绘制球体
+    // 为球体更新主CBV
+    XMMATRIX sphereWorld = XMLoadFloat4x4(&m_SphereWorldMatrix);
+    XMMATRIX view = m_Camera.GetViewMatrix();
+    XMMATRIX proj = m_Camera.GetProjMatrix();
+    XMMATRIX lightView = XMLoadFloat4x4(&m_LightViewMatrix);
+    XMMATRIX lightProj = XMLoadFloat4x4(&m_LightProjMatrix);
+
+    XMMATRIX wvp = sphereWorld * view * proj;
+    XMMATRIX lightWvp = sphereWorld * lightView * lightProj;
+
+    XMStoreFloat4x4(&m_Constants.wvpMatrix, wvp);
+    XMStoreFloat4x4(&m_Constants.worldMatrix, sphereWorld);
+    XMStoreFloat4x4(&m_Constants.lightWvpMatrix, lightWvp);
+    m_Constants.textureInfo.x = 2.0f; // 告诉着色器这是玻璃
+
+    // 使用第 3 个常量缓冲区槽位 (0=Cube, 1=Plane, 2=Sphere)
+    memcpy(m_pConstantBufferDataBegin + c_alignedSceneConstantBufferSize * 2, &m_Constants, sizeof(SceneConstants));
+
+    // 绑定球体的数据并绘制
+    m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress() + c_alignedSceneConstantBufferSize * 2);
+    m_CommandList->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_CommandList->IASetVertexBuffers(0, 1, &m_SphereVertexBufferView);
+    m_CommandList->IASetIndexBuffer(&m_SphereIndexBufferView);
+    m_CommandList->DrawIndexedInstanced(geometry.sphereIndices.size(), 1, 0, 0, 0); // 绘制球体
+}
+
+// --- 填充命令列表 ---
+void D3D12App::RenderMainPass()
+{
+    CD3DX12_RESOURCE_BARRIER barrier = {};
+    RenderOpaque(&barrier);
+    RenderTransparent();
 
     // 资源屏障 (Present)
     barrier = CD3DX12_RESOURCE_BARRIER::Transition(

@@ -142,3 +142,116 @@ void Geometry::LoadPlaneGeometry()
     planeVertexSize = (UINT)planeVertexs.size() * sizeof(Vertex);
     planeIndiceSize = (UINT)planeIndices.size() * sizeof(unsigned short);
 }
+
+void Geometry::LoadSphereGeometry()
+{
+    sphereVertexs.clear();
+    sphereIndices.clear();
+
+    const float PI = 3.1415926535f;
+    const float radius = 1.0f;
+    const UINT stackCount = 20; // 纬度
+    const UINT sliceCount = 20; // 经度
+
+    // --- 创建顶点 ---
+    // 从北极点开始
+    Vertex topVertex;
+    topVertex.position = XMFLOAT3(0.0f, radius, 0.0f);
+    topVertex.normal = XMFLOAT3(0.0f, 1.0f, 0.0f);
+    topVertex.texcoord = XMFLOAT2(0.5f, 0.0f);
+    topVertex.tangent = XMFLOAT3(1.0f, 0.0f, 0.0f); // 北极点的切线
+    topVertex.color = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+    sphereVertexs.push_back(topVertex);
+
+    // 中间的"环"
+    float phiStep = PI / stackCount;
+    float thetaStep = 2.0f * PI / sliceCount;
+
+    for (UINT i = 1; i <= stackCount - 1; ++i)
+    {
+        float phi = i * phiStep; // 0 (北极) 到 PI (南极)
+
+        for (UINT j = 0; j <= sliceCount; ++j)
+        {
+            float theta = j * thetaStep; // 0 到 2*PI
+
+            Vertex v;
+
+            // 球坐标 -> 笛卡尔坐标
+            v.position.x = radius * sinf(phi) * cosf(theta);
+            v.position.y = radius * cosf(phi);
+            v.position.z = radius * sinf(phi) * sinf(theta);
+
+            // 法线 (对于球体，法线就是归一化的位置)
+            XMStoreFloat3(&v.normal, XMVector3Normalize(XMLoadFloat3(&v.position)));
+
+            // 纹理坐标
+            v.texcoord = XMFLOAT2(theta / (2.0f * PI), phi / PI);
+
+            // 切线 (dPos / dTheta)
+            v.tangent.x = -radius * sinf(phi) * sinf(theta);
+            v.tangent.y = 0.0f;
+            v.tangent.z = radius * sinf(phi) * cosf(theta);
+            XMStoreFloat3(&v.tangent, XMVector3Normalize(XMLoadFloat3(&v.tangent)));
+
+            v.color = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+
+            sphereVertexs.push_back(v);
+        }
+    }
+
+    // 南极点
+    Vertex bottomVertex;
+    bottomVertex.position = XMFLOAT3(0.0f, -radius, 0.0f);
+    bottomVertex.normal = XMFLOAT3(0.0f, -1.0f, 0.0f);
+    bottomVertex.texcoord = XMFLOAT2(0.5f, 1.0f);
+    bottomVertex.tangent = XMFLOAT3(1.0f, 0.0f, 0.0f); // 南极点的切线
+    bottomVertex.color = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+    sphereVertexs.push_back(bottomVertex);
+
+
+    // --- 创建索引 ---
+    // 1. 北极的"扇形"
+    for (UINT i = 1; i <= sliceCount; ++i)
+    {
+        sphereIndices.push_back(0); // 北极点
+        sphereIndices.push_back(i + 1);
+        sphereIndices.push_back(i);
+    }
+
+    // 2. 中间的"四边形"
+    // baseIndex 指向当前"环"的起始顶点
+    // (第一个环是从索引 1 开始的)
+    UINT baseIndex = 1;
+    UINT ringVertexCount = sliceCount + 1;
+    for (UINT i = 0; i < stackCount - 2; ++i)
+    {
+        for (UINT j = 0; j < sliceCount; ++j)
+        {
+            sphereIndices.push_back(baseIndex + i * ringVertexCount + j);
+            sphereIndices.push_back(baseIndex + i * ringVertexCount + j + 1);
+            sphereIndices.push_back(baseIndex + (i + 1) * ringVertexCount + j);
+
+            sphereIndices.push_back(baseIndex + (i + 1) * ringVertexCount + j);
+            sphereIndices.push_back(baseIndex + i * ringVertexCount + j + 1);
+            sphereIndices.push_back(baseIndex + (i + 1) * ringVertexCount + j + 1);
+        }
+    }
+
+    // 3. 南极的"扇形"
+    // southPoleIndex 是最后一个顶点 (南极点)
+    UINT southPoleIndex = (UINT)sphereVertexs.size() - 1;
+    // (stackCount-1) * ringVertexCount + 1
+    baseIndex = southPoleIndex - ringVertexCount;
+
+    for (UINT i = 0; i < sliceCount; ++i)
+    {
+        sphereIndices.push_back(southPoleIndex);
+        sphereIndices.push_back(baseIndex + i);
+        sphereIndices.push_back(baseIndex + i + 1);
+    }
+
+    // 设置大小
+    sphereVertexSize = (UINT)sphereVertexs.size() * sizeof(Vertex);
+    sphereIndiceSize = (UINT)sphereIndices.size() * sizeof(uint16_t);
+}

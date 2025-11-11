@@ -336,10 +336,13 @@ float3 ProcessSpotLight(SpotLight light, float3 N, float3 V, float3 worldPos, fl
 float4 PSMain(PSInput input) : SV_Target
 {
     // 1. 从贴图采样材质属性
-    float3 albedo = g_AlbedoMap.Sample(g_SamplerMain, input.texcoord).rgb;
+    float4 albedoMap = g_AlbedoMap.Sample(g_SamplerMain, input.texcoord);
+    float3 albedo = albedoMap.rgb;
+    float alpha = albedoMap.a; //获取Alpha!
     if (textureInfo.x == 0.0f)
     {
         albedo = input.color.rgb;
+        alpha = input.color.a;
     }
 
     float metallic = g_MetallicMap.Sample(g_SamplerMain, input.texcoord).r;
@@ -356,10 +359,22 @@ float4 PSMain(PSInput input) : SV_Target
     {
         N = normalize(input.normalW); // 平面使用顶点法线
         
-        // 如果平面也没有贴图，则使用硬编码
-        metallic = 0.0f;
-        roughness = 0.8f;
-        ao = 1.0f;
+        // 为平面和玻璃球设置硬编码材质
+        if (textureInfo.x == 0.0f) // 平面
+        {
+            metallic = 0.0f;
+            roughness = 0.8f;
+            ao = 1.0f;
+            alpha = 1.0f; // 平面不透明
+        }
+        else // 假设 1.0f 是立方体, 0.0f 是平面, 其他值(比如 2.0f) 是玻璃球
+        {
+            albedo = float3(1.0, 1.0, 1.0); // 玻璃是白色的
+            metallic = 0.0f; // 玻璃是电介质
+            roughness = 0.1f; // 非常光滑的玻璃
+            ao = 1.0f; // 假设没有 AO
+            alpha = 0.3f; // 玻璃是半透明的
+        }
     }
     
     float3 V = normalize(eyePosW - input.worldPos); // 视图方向
@@ -380,5 +395,5 @@ float4 PSMain(PSInput input) : SV_Target
     float3 finalColor = Lo / (Lo + float3(1.0, 1.0, 1.0));
     finalColor = pow(finalColor, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
     
-    return float4(finalColor, 1.0);
+    return float4(finalColor, alpha);
 }

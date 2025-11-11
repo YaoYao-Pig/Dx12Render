@@ -69,11 +69,21 @@ protected:
     D3D12_VERTEX_BUFFER_VIEW m_VertexBufferView;
     ComPtr<ID3D12Resource> m_IndexBuffer;
     D3D12_INDEX_BUFFER_VIEW m_IndexBufferView;
-
+    XMFLOAT4X4 m_CubeWorldMatrix;
+    
     ComPtr<ID3D12Resource> m_PlaneVertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_PlaneVertexBufferView;
     ComPtr<ID3D12Resource> m_PlaneIndexBuffer;
     D3D12_INDEX_BUFFER_VIEW m_PlaneIndexBufferView;
+    XMFLOAT4X4 m_PlaneWorldMatrix;
+
+    ComPtr<ID3D12Resource> m_SphereVertexBuffer;
+    ComPtr<ID3D12Resource> m_SphereIndexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW m_SphereVertexBufferView;
+    D3D12_INDEX_BUFFER_VIEW m_SphereIndexBufferView;
+    XMFLOAT4X4 m_SphereWorldMatrix; // 球体的世界矩阵
+
+
 
     ComPtr<ID3D12Resource> m_ConstantBuffer;
     UINT8* m_pConstantBufferDataBegin;
@@ -125,8 +135,7 @@ protected:
     XMFLOAT4X4 m_LightViewMatrix;
     XMFLOAT4X4 m_LightProjMatrix;
 
-    XMFLOAT4X4 m_CubeWorldMatrix;
-    XMFLOAT4X4 m_PlaneWorldMatrix;
+
 
     XMFLOAT3 m_BaseDirLightDirection;
 
@@ -140,8 +149,9 @@ protected:
     ComPtr<ID3D12Resource> m_AoTexture;        // t3
     ComPtr<ID3D12Resource> m_NormalTexture;    // t4
 
-  
-
+ private:
+     void RenderOpaque(CD3DX12_RESOURCE_BARRIER* barrier);
+     void RenderTransparent();
 private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     std::string m_pbr_text_tail = ".jpg";

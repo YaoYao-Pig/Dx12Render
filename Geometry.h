@@ -11,7 +11,6 @@ class Geometry {
 public:
 	std::vector<Vertex> vertexs;
 	std::vector<WORD> indices;
-
 	UINT vertexSize;
 	UINT indiceSize;
 
@@ -19,10 +18,19 @@ public:
 	std::vector<uint16_t> planeIndices;
 	UINT planeVertexSize = 0;
 	UINT planeIndiceSize = 0;
+
+
+	std::vector<Vertex> sphereVertexs;
+	std::vector<uint16_t> sphereIndices;
+	UINT sphereVertexSize = 0;
+	UINT sphereIndiceSize = 0;
+
 	void LoadCubeGeometry();
 	void LoadPlaneGeometry();
+	void LoadSphereGeometry();
 	void LoadGeometry() {
 		LoadCubeGeometry();
 		LoadPlaneGeometry();
+		LoadSphereGeometry();
 	}
 };
