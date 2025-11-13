@@ -1,3 +1,7 @@
+# 前言
+
+Hi你好，如果有幸让你看到我的小项目，是我的荣幸，这是我使用DX12完成的一个小渲染器吧，会整理我实现各种功能的时候一些踩坑和心得，以及由此展开的一些图形学知识的再次学习。感谢你的阅读，期待Star和Issue。
+
 # ShadowMap
 
 ![ShadowMap](assets/ShadowMap.gif)
@@ -128,6 +132,20 @@ float4 PSMain(PSInput input) : SV_Target
 我让AI总结了下上面的流程：
 
 ![image-20251102213639088](assets/image-20251102213639088.png)
+
+## ShadowMap分辨率
+
+我的窗口大小设置的是1024x1204，但是我的ShadowPass的视口设置的是2048x2048
+
+如果我用256x256的分辨率，就会使这样的效果m_ShadowMap = std::make_unique\<ShadowMap\>(m_Device.Get(), 2048, 2048);
+
+![image-20251113161856308](assets/image-20251113161856308.png)
+
+
+
+其实就是单一纹素对应多个像素的问题。增大阴影贴图的采样大小可以很好的缓解锯齿问题，在要不然就开MipMap
+
+如果阴影贴图分辨率太小了，那么MainPass渲染阴影的时候，就很可能会出现多个像素最后落在同一个纹素的情况，我这里还开了PCF，但是锯齿还是很严重
 
 # 多物体渲染
 
@@ -474,6 +492,248 @@ Sampler是绑定在根签名上的
 # 透明管线
 
 ![Transport](assets/Transport.gif)
+
+
+
+## 遇到的问题
+
+### 渲染顺序
+
+多个半透明物体渲染的时候必须要由远到近，因为它自身不存在深度写入，并且AlphaBlend的时候依赖Dst和Src这两个颜色，正确的顺序写入BackBuffer是很重要的。
+
+> AlphaBlend的数学公式，不支持交换律
+
+### EarlyZ
+
+很多人都没有解释清楚，为什么EZ有效果，或者为什么AplhaTest会影响EZ
+
+其实，对于AlphaBlend来说，EZ也是存在的，只是关闭了深度写入。但是对于AlphaTest，才是真正影响了EZ，因为存在discard（比如铁丝网，由于存在透明部分，丢弃掉当前渲染的片元）所以EZ阶段不能写入当前深度。
+
+我第一次看到的时候我很疑惑啊，为啥啊，这都啥乱七八糟的，AlphaBlend直接把深度写入关了不影响EZ，但是AlphaTest也不能写入深度所以就会影响EZ，这都啥跟啥啊。现在我才完全理解EZ：
+
+首先要说明的是，EZ其实是包括：提前深度检测和提前深度写入的，这俩配合在一起，才是完全的能力。
+
+核心的问题是：为什么不能 先做测试(Test)，然后挂起写入，等Shader跑完如果没有discard，再补上写入(Write)？
+
+为什么呢？因为GPU是高度并行的。
+
+想象一下，GPU 不是一个一个像素画的，它是成千上万个像素同时涌入流水线的。
+
+> #### 场景模拟：同一点上的两个重叠像素
+>
+> 假设屏幕坐标 `(100, 100)` 这个点上，有两个片元（Fragment）先后飞过来：
+>
+> 1. **片元 A（红色，在前，Z=0.5）**：带有 `discard` 逻辑（比如一片破损的树叶）。
+> 2. **片元 B（蓝色，在后，Z=0.8）**：普通不透明物体
+>
+> #### 如果按照设想的逻辑（Test Early, Write Late）：
+>
+> 1. **T时刻 - 片元 A 进来了**：
+>    - **Early-Z 测试**：A 的 Z(0.5) < 缓冲 Z(1.0)。**通过！**
+>    - **状态**：A 开始跑 Shader（计算纹理、光照、决定是否 discard）。这是一个漫长的过程。
+>    - **关键点**：此时，**A 还没有写入深度**（因为还在等结果）。深度缓冲区里还是 **1.0**。
+> 2. **T+1时刻 - 片元 B 紧接着进来了**（A 还在跑 Shader）：
+>    - **Early-Z 测试**：B 的 Z(0.8) vs 缓冲 Z(1.0) **（注意！这里读到的还是旧的 1.0，因为 A 还没写进去！）**
+>    - **测试结果**：0.8 < 1.0。**通过！**
+>    - **后果**：GPU 认为 B 也能看见，于是 B 也开始跑 Shader。
+> 3. **T+100时刻 - A 跑完了**：
+>    - A 决定不 discard。
+>    - A 写入深度 0.5。
+>
+> **最终结果**： 片元 B 虽然明明被 A 挡住了（0.8 > 0.5），但因为它进来的时候，A 还没更新占位，导致 B **错误地通过了测试**并浪费了算力去跑 Shader。
+>
+> **这就是 Early-Z 失效的本质**： Early-Z 想要发挥最大威力（剔除后续像素），它必须是一个 **原子操作（Atomic Operation）**：**测试通过后必须立即写入**。只有立即写入，紧跟在屁股后面的像素才能读到最新的深度，从而被剔除。
+
+EZ提高性能的关键在于，如果对于不透明物体来说，很多个片元是完全并发的，因此，当我们并发的处理两个会被渲染在同一个像素上的片元的时候，假设这俩同时要被处理。EZ就在于，他会原子的检测和写入当前处理中的片元
+
+比如在上面的例子中，EZ起作用的情况是，先检测并且写入了A的深入，A发现是在前面的，所以开始PS，这时候B也来检测，发现DepthBuffer里的值已经是A的了，比自己更浅，所以就把B直接丢掉了。这时候就减少了OverDraw了
+
+所以可以发现，EZ能起作用，提前的检测是一方面，提前的写入深度才是最重要的。
+
+### EarlyZ的延申
+
+#### 为什么Discard会导致EZ失效？
+
+这时候新的问题就出现了，为什么Discard会导致EZ失效？。原因在于，如果接下来的操作存在discard，那么EZ就没法直接写入当前深度。因为当前片元是有可能被丢掉的。所以在存在discard 的时候，即使可以做EZ的检测，但是无法写入EZ的深度，也依然没法起到很好的提高性能的作用。
+
+#### EZ的运行依赖片元顺序
+
+不难想到，这样的EZ，Early-Z 的威力大小，几乎完全取决于你提交片元的“顺序”。或者说是管线处理片元的顺序
+
+最差情况：从后往前渲染 (Back-to-Front)，也就是画家算法，也就是我下面天空盒的时候遇到的渲染顺序的问题。如果先用一个PSO画天空盒，那么就相当于强制先画了远的，那么进的这些就一定要再次画一遍，这时候EZ就效果不佳
+
+最佳情况：从前向后渲染 (Front-to-Back)，也就是先画近处物体，在画远处的
+
+但是这只是宏观来看，对于GPU来说，它处理的对象就是片元，因此最好的情况是，GPU并发处理的片元本身就有一种顺序
+
+现代游戏引擎（Unreal, Unity 等）通常会采用以下两种策略来“喂”给 Early-Z 最好的数据
+
+> #### A. CPU 端粗略排序
+>
+> 在 CPU 提交 Draw Call 之前，计算物体中心到摄像机的距离。
+>
+> - **不透明物体**：按距离**从近到远**排序（Front-to-Back）。
+>   - 目的：最大化 Early-Z 剔除。
+> - **透明物体**：按距离**从远到近**排序（Back-to-Front）。
+>   - 目的：为了颜色混合正确（和 Early-Z 无关，透明物体 Early-Z 只能读不能写）。
+>
+> #### B. Z-Prepass (深度预过程) —— 终极优化
+>
+> 有时候物体形状很复杂（比如穿插的甜甜圈），光靠 CPU 排序中心点可能不准。于是有了更暴力的做法：
+>
+> 1. **Pass 1: 深度预渲染 (Z-Prepass)**
+>    - **关掉颜色写入**，只开深度写入。
+>    - 用一个**极简的 Shader**（没有任何光照、纹理采样，甚至 Pixel Shader 是空的）把所有物体快速画一遍。
+>    - **目的**：以极小的代价，先把最正确的深度值填满 Z-Buffer。
+> 2. **Pass 2: 正式渲染 (Base Pass)**
+>    - 把深度写入模式改为 `D3D12_DEPTH_WRITE_MASK_ZERO` (或保留写入)，深度测试设为 `EQUAL` (等于)。
+>    - 运行完整的、昂贵的 PBR Shader。
+>    - **效果**：这时候，只有深度**完全等于** Z-Buffer 里的像素才会运行 Shader。
+>    - **结果**：**Overdraw = 0**。哪怕你顺序是乱的，Early-Z 也能保证每个像素只运行一次最昂贵的 Shader。
+
+## OIT (Order-Independent Transparency, 与顺序无关的透明)
+
+
+
+# 凹凸贴图
+
+
+
+没有法线贴图的时候：
+
+
+
+# 天空盒
+
+随便找了一张图复制了六遍
+
+![ ](assets/image-20251113162421670.png)
+
+我是用SubResouce+CubeMap实现的
+
+
+
+
+
+## 遇到的问题：
+
+### 1. 渲染顺序的问题
+
+应该先执行ShadwPass，然后再渲染不透明物体，再渲染天空盒，再渲染透明物体
+
+我最开始用的是先渲染了天空盒，然后渲染的不透明物体
+
+这样会导致的问题就是OverDraw，原因很简单，天空盒是处于最后面的，因此，它的Z就默认是1（DX12的Z轴是向+Z是正方向，1最深）。因此它是很容易被丢弃的。也因此，如果先绘制天空盒，就很可能会导致天空盒的片元走完PS之后，写入深度缓冲区，片元也写入了BackBuffer（也就是RTV所指向的那个Resource），但是不透明物体渲染的时候又给他覆盖了。这就是OverDraw
+
+换一下就好了
+
+### 2. 渲染顺序暴露的问题
+
+调整完渲染顺序如下：
+
+```cpp
+
+void D3D12App::OnRender()
+{
+    // Pass 1: 渲染阴影贴图
+    RenderShadowMap();
+    // Pass 2: 渲染主场景 
+    RenderMainPass();
+    ID3D12CommandList* ppCommandLists[] = { m_CommandList.Get() };
+    m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
+    ThrowIfFailed(m_SwapChain->Present(1, 0));
+    WaitForGpu();
+}
+void D3D12App::RenderMainPass()
+{
+    CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_RenderTargets[m_FrameIndex].Get(),
+        D3D12_RESOURCE_STATE_PRESENT,
+        D3D12_RESOURCE_STATE_RENDER_TARGET
+    );
+    m_CommandList->ResourceBarrier(1, &barrier);
+    // 设置主渲染目标 (RTV 和 DSV) 
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RtvHeap->GetCPUDescriptorHandleForHeapStart());
+    rtvHandle.Offset(m_FrameIndex, m_RtvDescriptorSize);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE dsvHandle(m_DsvHeap->GetCPUDescriptorHandleForHeapStart()); // (主 DSV 在 Slot 0)
+    m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+    // 清除 RTV 和 DSV (在所有绘制之前执行)
+    const float clearColor[] = { 0.1f, 0.2f, 0.4f, 1.0f };
+    m_CommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+    m_CommandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+    RenderOpaque();
+    RenderSkyBox();
+    
+
+
+    RenderTransparent();
+
+```
+
+我突然发现，好像效果和原来不一样。在先SkyBox再不透明的时候
+
+```cpp
+RenderSkyBox();    
+RenderOpaque();
+```
+
+渲染出来是这样的：
+
+![image-20251113164150189](assets/image-20251113164150189.png)
+
+是不是感觉背后天空盒被放大了，或者说相当于把一部分拉伸到了整个天空盒的面上
+
+没错，原因在于，我忘记再RenderSkyBox当中重新设置视口和裁切矩阵了
+
+```c++
+//原来的
+void D3D12App::RenderSkyBox() {
+    m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Skybox));
+    m_CommandList->SetGraphicsRootSignature(m_SkyboxRootSignature.Get());
+
+    // 绑定 SRV 堆 (它包含了所有 PBR 贴图和天空盒)
+    ID3D12DescriptorHeap* srvHeap[] = { m_SrvHeap.Get() };
+    m_CommandList->SetDescriptorHeaps(_countof(srvHeap), srvHeap);
+    
+ void D3D12App::RenderSkyBox() {
+    m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Skybox));
+    m_CommandList->SetGraphicsRootSignature(m_SkyboxRootSignature.Get());
+ 
+   	m_CommandList->RSSetViewports(1, &m_Viewport); //<--多了这个
+    m_CommandList->RSSetScissorRects(1, &m_ScissorRect); //<--多了这个
+
+    // 绑定 SRV 堆 (它包含了所有 PBR 贴图和天空盒)
+    ID3D12DescriptorHeap* srvHeap[] = { m_SrvHeap.Get() };
+    m_CommandList->SetDescriptorHeaps(_countof(srvHeap), srvHeap);
+```
+
+想一下，在RenderMainPass之前，我们做了什么。是ShadowPass对吧。ShadowPass里面为了防止阴影贴图太小了导致阴影锯齿，所以我们那个pass设置的视口是很大的2048x2048，（**请注意，ShadowPass不需要渲染到backBuffer，因此，这个2048x2048是和ShadowMap这个Rersource的大小匹配的。**）
+
+结果我原来的RenderSkyBox里忘记重新设置视口了，但是RenderSkyBox这个pass其实和正常的pass没啥区别，区别其实是在RootSignature上，我们用了一个更简化的Shader
+
+这会带来什么问题呢？想象一下，我们的视口是2024x2024，但是我们Swapchain创建的BackBuffer是1280x720的。所以就导致屏幕右侧的物体，会越界。DX12对于这种越界的像素就直接丢弃了，所以就导致只能看到 NDC 空间中被映射到 0~1280 范围内的那部分内容（也就是左上角）。整张原本应该铺满全屏的图，现在只有左边的一半能挤进这个 1280 的窄窗口里，看起来就像是**局部放大**了。
+
+**BackBuffer** 是画布，决定了你能画的最大范围（物理分辨率）。
+
+**RTV** 是画架，把画布架到 GPU 上。
+
+**Viewport** 是投影仪的焦距设置，决定了怎么把图像投到画布上。
+
+**问题原因**：投影仪投出的画面（2048宽）比画布（1280宽）大，导致只能看到画面的一部分。
+
+![image-20251113165316667](assets/image-20251113165316667.png)
+
+> ViewPort指的是一个虚拟的屏幕，最好的情况是这个虚拟屏幕和最后的BackBuffer是大小对应的，这样就是一比一的
+>
+> ![image-20251113165601533](assets/image-20251113165601533.png)
+
+
+
+
+
+
 
 # TODO
 

@@ -156,7 +156,7 @@ protected:
     ComPtr<ID3D12RootSignature> m_SkyboxRootSignature;
 
  private:
-     void RenderOpaque(CD3DX12_RESOURCE_BARRIER* barrier);
+     void RenderOpaque();
      void RenderTransparent();
      void RenderSkyBox();
 private:

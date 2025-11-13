@@ -597,7 +597,9 @@ void D3D12App::CreateResources()
     LoadTextureFromFile(std::string("pbr_normal" + m_pbr_text_tail).c_str(), m_NormalTexture, srvHandle);
     m_NormalTexture->SetName(L"Normal Texture");
     //t5: ShadowMap SRV 是在 InitD3D12 中创建的
-
+    // t5 (ShadowMap) 的槽位在 InitD3D12 中被占用, 我们需要跳过它 ,临时处理
+    srvHandle.Offset(1, srvDescriptorSize); // 句柄现在指向 t5
+    srvHandle.Offset(1, srvDescriptorSize); // 句柄现在指向 t6
     // t6: Skybox Cube Map
     std::vector<std::string> skyboxFaces = {
         "px.png", "nx.png",
@@ -718,12 +720,11 @@ void D3D12App::LoadCubeMapTexture(
         throw std::runtime_error("Cube map loading requires 6 texture filenames.");
     }
 
-    // 1. 加载 6 张图的 CPU 数据
+    //  加载 6 张图的 CPU 数据
     std::vector<stbi_uc*> pTextureData(6);
     int textureWidth, textureHeight, textureChannels;
     D3D12_RESOURCE_DESC textureDesc = {};
 
-    // (假定所有6张图的尺寸和格式都一样)
     pTextureData[0] = stbi_load(filenames[0].c_str(), &textureWidth, &textureHeight, &textureChannels, STBI_rgb_alpha);
     if (pTextureData[0] == nullptr) throw std::runtime_error("Failed to load cubemap texture: " + filenames[0]);
 
@@ -734,12 +735,12 @@ void D3D12App::LoadCubeMapTexture(
 
     UINT texturePixelSize = 4; // STBI_rgb_alpha
 
-    // 2. 创建纹理资源 (Texture Resource)
+    // 创建纹理资源
     // 这是一个 Texture2D 数组，包含 6 个元素
     textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     textureDesc.Width = textureWidth;
     textureDesc.Height = textureHeight;
-    textureDesc.DepthOrArraySize = 6; // <-- 关键: 6 个数组切片
+    textureDesc.DepthOrArraySize = 6; // 6 个数组切片
     textureDesc.MipLevels = 1;        // (IBL 稍后会需要 MipLevels)
     textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     textureDesc.SampleDesc.Count = 1;
@@ -753,7 +754,7 @@ void D3D12App::LoadCubeMapTexture(
         nullptr, IID_PPV_ARGS(&textureResource)
     ));
 
-    // 3. 准备 Subresource 数据 (每个数组元素是一个 Subresource)
+    // 准备 Subresource 数据 (每个数组元素是一个 Subresource)
     std::vector<D3D12_SUBRESOURCE_DATA> subresources;
     for (int i = 0; i < 6; ++i)
     {
@@ -764,12 +765,12 @@ void D3D12App::LoadCubeMapTexture(
         subresources.push_back(subresourceData);
     }
 
-    // 4. 获取上传缓冲区大小 (Upload Buffer Size)
+    // 获取上传缓冲区大小
     UINT64 textureUploadBufferSize;
-    // (注意: MipLevels=1, ArraySize=6)
+    // 注意: MipLevels=1, ArraySize=6
     m_Device->GetCopyableFootprints(&textureDesc, 0, 6, 0, nullptr, nullptr, nullptr, &textureUploadBufferSize);
 
-    // 5. 创建和映射上传缓冲区 (Upload Buffer)
+    // 创建和映射上传缓冲区
     ComPtr<ID3D12Resource> pTextureUploadBuffer;
     heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
     auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(textureUploadBufferSize);
@@ -780,7 +781,7 @@ void D3D12App::LoadCubeMapTexture(
     ));
     resourceManager.AddResource2TmpBuffer(pTextureUploadBuffer);
 
-    // 6. 拷贝数据到纹理资源
+    // 拷贝数据到纹理资源
     UpdateSubresources(
         m_CommandList.Get(),
         textureResource.Get(),
@@ -788,7 +789,6 @@ void D3D12App::LoadCubeMapTexture(
         0, 0, 6, // 拷贝 6 个 subresources
         subresources.data());
 
-    // (我们还需要一个 Barrier 转换资源状态)
     auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
         textureResource.Get(),
         D3D12_RESOURCE_STATE_COPY_DEST,
@@ -796,17 +796,17 @@ void D3D12App::LoadCubeMapTexture(
     );
     m_CommandList->ResourceBarrier(1, &barrier);
 
-    // 7. 释放 STB 加载的内存
+    // 释放 STB 加载的内存
     for (int i = 0; i < 6; ++i)
     {
         stbi_image_free(pTextureData[i]);
     }
 
-    // 8. 创建 SRV (Shader Resource View)
+    // 创建 SRV
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Format = textureDesc.Format;
-    // *** 关键: 告诉 DX12 这是一个 Cube Map! ***
+    // 告诉 DX12 这是一个 Cube Map!
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
     srvDesc.TextureCube.MipLevels = 1;
     srvDesc.TextureCube.MostDetailedMip = 0;
@@ -1111,7 +1111,7 @@ void D3D12App::LoadTextureFromFile(
 }
 
 
-void D3D12App::RenderOpaque(CD3DX12_RESOURCE_BARRIER* barrier) {
+void D3D12App::RenderOpaque() {
     // 设置主通道 PSO
     m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Common));
 
@@ -1121,25 +1121,6 @@ void D3D12App::RenderOpaque(CD3DX12_RESOURCE_BARRIER* barrier) {
     // 设置视口和裁剪矩形 (主摄像机)
     m_CommandList->RSSetViewports(1, &m_Viewport);
     m_CommandList->RSSetScissorRects(1, &m_ScissorRect);
-
-    // 资源屏障 (Render Target)
-    *barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        m_RenderTargets[m_FrameIndex].Get(),
-        D3D12_RESOURCE_STATE_PRESENT,
-        D3D12_RESOURCE_STATE_RENDER_TARGET
-    );
-    m_CommandList->ResourceBarrier(1, barrier);
-
-    // 设置主渲染目标 (RTV 和 DSV) 
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RtvHeap->GetCPUDescriptorHandleForHeapStart());
-    rtvHandle.Offset(m_FrameIndex, m_RtvDescriptorSize);
-    CD3DX12_CPU_DESCRIPTOR_HANDLE dsvHandle(m_DsvHeap->GetCPUDescriptorHandleForHeapStart()); // (主 DSV 在 Slot 0)
-    m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
-
-    // 清除 RTV 和 DSV
-    const float clearColor[] = { 0.1f, 0.2f, 0.4f, 1.0f };
-    m_CommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-    m_CommandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     //  绑定描述符堆 
     // SRV 堆现在包含 Texture 和 ShadowMap
     // Const 堆包含 Light)
@@ -1236,6 +1217,9 @@ void D3D12App::RenderSkyBox() {
     m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Skybox));
     m_CommandList->SetGraphicsRootSignature(m_SkyboxRootSignature.Get());
 
+    m_CommandList->RSSetViewports(1, &m_Viewport);
+    m_CommandList->RSSetScissorRects(1, &m_ScissorRect);
+
     // 绑定 SRV 堆 (它包含了所有 PBR 贴图和天空盒)
     ID3D12DescriptorHeap* srvHeap[] = { m_SrvHeap.Get() };
     m_CommandList->SetDescriptorHeaps(_countof(srvHeap), srvHeap);
@@ -1272,12 +1256,29 @@ void D3D12App::RenderSkyBox() {
     m_CommandList->DrawIndexedInstanced(36, 1, 0, 0, 0); // 绘制立方体
 
 }
-// --- 填充命令列表 ---
 void D3D12App::RenderMainPass()
 {
-    CD3DX12_RESOURCE_BARRIER barrier = {};
+    CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_RenderTargets[m_FrameIndex].Get(),
+        D3D12_RESOURCE_STATE_PRESENT,
+        D3D12_RESOURCE_STATE_RENDER_TARGET
+    );
+    m_CommandList->ResourceBarrier(1, &barrier);
+    // 设置主渲染目标 (RTV 和 DSV) 
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RtvHeap->GetCPUDescriptorHandleForHeapStart());
+    rtvHandle.Offset(m_FrameIndex, m_RtvDescriptorSize);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE dsvHandle(m_DsvHeap->GetCPUDescriptorHandleForHeapStart()); // (主 DSV 在 Slot 0)
+    m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+    // 清除 RTV 和 DSV (在所有绘制之前执行)
+    const float clearColor[] = { 0.1f, 0.2f, 0.4f, 1.0f };
+    m_CommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+    m_CommandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+    RenderOpaque();
     RenderSkyBox();
-    RenderOpaque(&barrier);
+    
+
 
     RenderTransparent();
 
@@ -1298,10 +1299,8 @@ void D3D12App::RenderMainPass()
     ThrowIfFailed(m_CommandList->Close());
 }
 
-// --- 同步 (同前) ---
 void D3D12App::WaitForGpu()
 {
-    // ... (同前, 100% 未修改) ...
     const UINT64 fenceToSignal = m_FenceValue;
     ThrowIfFailed(m_CommandQueue->Signal(m_Fence.Get(), fenceToSignal));
     m_FenceValue++;
