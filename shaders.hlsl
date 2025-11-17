@@ -73,6 +73,7 @@ Texture2D g_ShadowMap : register(t5);
 
 Texture2D g_BrdfLutTexture : register(t7); // <-- 添加 IBL
 TextureCube g_IrradianceMap : register(t8); // <-- 添加 IBL
+TextureCube g_PrefilteredMap : register(t9);
 
 SamplerState g_SamplerMain : register(s0);
 SamplerComparisonState g_SamplerCmp : register(s1);
@@ -368,15 +369,23 @@ float4 PSMain(PSInput input) : SV_Target
             metallic = 0.0f;
             roughness = 0.8f;
             ao = 1.0f;
-            alpha = 1.0f; // 平面不透明
+            alpha = 1.0f;
         }
-        else // 假设 1.0f 是立方体, 0.0f 是平面, 其他值(比如 2.0f) 是玻璃球
+        else if (textureInfo.x == 3.0f) // <-- 新的镜面球
         {
-            albedo = float3(1.0, 1.0, 1.0); // 玻璃是白色的
-            metallic = 0.0f; // 玻璃是电介质
-            roughness = 0.1f; // 非常光滑的玻璃
-            ao = 1.0f; // 假设没有 AO
-            alpha = 0.3f; // 玻璃是半透明的
+            albedo = float3(1.0, 1.0, 1.0); // 金属 albedo (白色)
+            metallic = 1.0f; // 高金属度
+            roughness = 0.05f; // 低粗糙度
+            ao = 1.0f;
+            alpha = 1.0f;
+        }
+        else // 假设是 2.0f 玻璃球
+        {
+            albedo = float3(1.0, 1.0, 1.0);
+            metallic = 0.0f;
+            roughness = 0.1f;
+            ao = 1.0f;
+            alpha = 0.3f;
         }
     }
     
@@ -385,24 +394,44 @@ float4 PSMain(PSInput input) : SV_Target
     // 3. 计算 F0 (基础反射率)
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
     
-    float3 kS = fresnelSchlick(saturate(dot(N, V)), F0); // 镜面反射部分
-    float3 kD = (1.0 - kS) * (1.0 - metallic); // 漫反射部分 (金属没有漫反射)
+    // 4.IBL环境光
+    // 4a. IBL 漫反射 (来自 Irradiance Map t8)
     float3 irradiance = g_IrradianceMap.Sample(g_SamplerMain, N).rgb;
-    float3 diffuse = irradiance * albedo; // * kD; (kD 理论上应该在这里，但通常 albedo * kD 已经分离了)
+    float3 diffuse = irradiance * albedo;
     
+    // 4b. IBL 镜面反射 (来自 Prefiltered Map t9 和 BRDF LUT t7)
+    float3 R = reflect(-V, N); // 反射向量
+    const float MAX_MIP_LEVEL = 4.0; // 对应 5 个 Mip (0, 1, 2, 3, 4)
+    float mipLevel = roughness * MAX_MIP_LEVEL;
     
-    // 4. 初始化出射光线 (Lo)
-    float3 Lo = (kD * diffuse) * ao;
+    // 用 mipLevel 采样 Prefiltered Map
+    float3 prefilteredColor = g_PrefilteredMap.SampleLevel(g_SamplerMain, R, mipLevel).rgb;
     
-    // 5. 累加所有光源
-    // (这些函数现在将使用我们从法线贴图计算出的 N)
+    // 用 NdotV 和 roughness 采样 BRDF LUT
+    float2 brdf = g_BrdfLutTexture.Sample(g_SamplerMain, float2(saturate(dot(N, V)), roughness)).rg;
+    
+    // Cook-Torrance IBL 镜面反射方程
+    float3 kS = fresnelSchlick(saturate(dot(N, V)), F0); // F (菲涅尔)
+    float3 specular = prefilteredColor * (kS * brdf.x + brdf.y);
+    
+    // 4c. IBL 漫反射的菲涅尔
+    float3 kD = (1.0 - kS) * (1.0 - metallic);
+    
+    // 4d. 组合 IBL
+    float3 ambient = (kD * diffuse + specular) * ao;
+    
+    // 5. 初始化出射光线 (Lo)
+    // Lo = 直接光 + 间接光(IBL)
+    float3 Lo = ambient;
+    
+    // 6. 累加所有直接光源
     Lo += ProcessDirectionalLight(DirLight, N, V, input.worldPos, input.lightSpacePos, F0, albedo, roughness, metallic);
     Lo += ProcessPointLight(pointLight, N, V, input.worldPos, F0, albedo, roughness, metallic);
     Lo += ProcessSpotLight(spotLight, N, V, input.worldPos, F0, albedo, roughness, metallic);
     
-    // 6. 后处理 (同前)
-    float3 finalColor = Lo / (Lo + float3(1.0, 1.0, 1.0));
-    finalColor = pow(finalColor, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+    // 7. 后处理 (HDR -> LDR)
+    float3 finalColor = Lo / (Lo + float3(1.0, 1.0, 1.0)); // 曝光
+    finalColor = pow(finalColor, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2)); // Gamma
     
     return float4(finalColor, alpha);
 }
@@ -654,4 +683,49 @@ float4 IrradiancePS(PSInputSky input) : SV_Target
     // irradiance = PI * irradiance / float(SAMPLE_COUNT); 
     
     return float4(irradiance, 1.0);
+}
+
+float4 PrefilterPS(PSInputSky input) : SV_Target
+{
+    // R 是我们采样的方向 (来自 VS 的 texcoord)
+    float3 R = normalize(input.texcoord);
+    // V = R (因为我们假设 V = R = N)
+    float3 V = R;
+    float3 N = R;
+    
+    // 粗糙度来自 CBV b0 (textureInfo.y)
+    float roughness = textureInfo.y;
+    
+    // 我们需要TBN来转换采样
+    float3 up = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    float3 T = normalize(cross(up, N));
+    float3 B = cross(N, T);
+    float3x3 TBN = float3x3(T, B, N);
+
+    float3 prefilteredColor = float3(0.0, 0.0, 0.0);
+    float totalWeight = 0.0;
+    
+    const uint SAMPLE_COUNT = 1024u;
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+    {
+        // 获取低差异采样点
+        float2 Xi = Hammersley(i, SAMPLE_COUNT);
+        // 生成 H (半程向量), 基于 GGX 重要性采样
+        float3 H = ImportanceSampleGGX(Xi, N, roughness);
+        // 计算 L (光照/采样向量)
+        float3 L = normalize(2.0 * dot(V, H) * H - V);
+        
+        float NdotL = saturate(dot(N, L));
+        if (NdotL > 0.0)
+        {
+            // 用 L 采样天空盒
+            prefilteredColor += g_SkyboxTexture.Sample(g_SamplerMainSky, L).rgb * NdotL;
+            totalWeight += NdotL;
+        }
+    }
+    
+    // 平均采样结果
+    prefilteredColor = prefilteredColor / totalWeight;
+    
+    return float4(prefilteredColor, 1.0);
 }

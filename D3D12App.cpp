@@ -263,6 +263,7 @@ void D3D12App::InitD3D12()
     shaderCompiler.AddShaderEntryPoints({ "SkyboxVS", "SkyboxPS" });
     shaderCompiler.AddShaderEntryPoints({ "BrdfLutVS", "BrdfLutPS" });
     shaderCompiler.AddShaderEntryPoints({ "IrradiancePS" });
+    shaderCompiler.AddShaderEntryPoints({ "PrefilterPS" });
 
     psoContainer.Init(m_Device);
     geometry.LoadGeometry();
@@ -301,7 +302,7 @@ void D3D12App::CreateDescriptorHeaps()
     // 为 IBL 生成创建一个 RTV 堆
     D3D12_DESCRIPTOR_HEAP_DESC iblRtvHeapDesc = {};
     iblRtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    iblRtvHeapDesc.NumDescriptors = 1 + 6; /// 1 BRDF LUT + 6 Irradiance Map Faces
+    iblRtvHeapDesc.NumDescriptors = 64; /// 1 (BRDF) + 6 (Irradiance) + (5 mips * 6 faces) = 37
     iblRtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ThrowIfFailed(m_Device->CreateDescriptorHeap(&iblRtvHeapDesc, IID_PPV_ARGS(&m_IblRtvHeap)));
     m_IblRtvHeap->SetName(L"IBL RTV Heap");
@@ -639,6 +640,25 @@ void D3D12App::CreatePSO()
 
     psoContainer.BuildPSO(RenderQueue::Irradiance, &irradiancePsoDesc);
 
+
+    // 我们可以复用 Irradiance PSO 的设置
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC prefilterPsoDesc = irradiancePsoDesc;
+
+    // 复用 Skybox 根签名 (b0: CBV, t0: SRV)
+    prefilterPsoDesc.pRootSignature = m_SkyboxRootSignature.Get();
+
+    // 复用 SkyboxVS
+    prefilterPsoDesc.VS.pShaderBytecode = shaderCompiler.GetShader("SkyboxVS")->GetBufferPointer();
+    prefilterPsoDesc.VS.BytecodeLength = shaderCompiler.GetShader("SkyboxVS")->GetBufferSize();
+    // 使用新的 PrefilterPS
+    prefilterPsoDesc.PS.pShaderBytecode = shaderCompiler.GetShader("PrefilterPS")->GetBufferPointer();
+    prefilterPsoDesc.PS.BytecodeLength = shaderCompiler.GetShader("PrefilterPS")->GetBufferSize();
+
+    // RTV 格式 (我们使用 16 位浮点来提高 HDR 精度)
+    prefilterPsoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+    psoContainer.BuildPSO(RenderQueue::Prefilter, &prefilterPsoDesc);
+
 }
 
 void D3D12App::CreateResources()
@@ -742,6 +762,72 @@ void D3D12App::CreateResources()
     irradianceSrvDesc.TextureCube.MostDetailedMip = 0;
     irradianceSrvDesc.TextureCube.ResourceMinLODClamp = 0.0f;
     m_Device->CreateShaderResourceView(m_IrradianceMapTexture.Get(), &irradianceSrvDesc, irradianceSrvHandle);
+
+
+    m_Device->CreateShaderResourceView(m_IrradianceMapTexture.Get(), &irradianceSrvDesc, irradianceSrvHandle);
+
+    // 3. Prefiltered Map 纹理 (128x128 Cubemap, 5 Mips)
+    const UINT prefilterMapSize = 128;
+    const UINT prefilterMapMips = 5; // 128, 64, 32, 16, 8
+
+    D3D12_RESOURCE_DESC prefilterMapDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+        DXGI_FORMAT_R16G16B16A16_FLOAT, // HDR 格式
+        prefilterMapSize, prefilterMapSize,
+        6,                            // 6 个数组切片
+        prefilterMapMips,             // 5 Mip 级别
+        1, 0,
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
+    );
+    D3D12_CLEAR_VALUE prefilterClearValue = {};
+    prefilterClearValue.Format = prefilterMapDesc.Format;
+    // ... (Color 0,1,2,3 默认为 0)
+
+    ThrowIfFailed(m_Device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &prefilterMapDesc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, // 初始状态
+        &prefilterClearValue,
+        IID_PPV_ARGS(&m_PrefilteredMapTexture)
+    ));
+    m_PrefilteredMapTexture->SetName(L"Prefiltered Map");
+
+    // --- 为 Prefiltered Map 创建视图 ---
+    // 1. RTV (30 个, m_IblRtvHeap 的第 7-36 个槽位)
+    iblRtvDescriptorSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE prefilterRtvHandle(m_IblRtvHeap->GetCPUDescriptorHandleForHeapStart());
+    prefilterRtvHandle.Offset(1 + 6, iblRtvDescriptorSize); // 跳过 1(BRDF)+6(Irr)
+
+    for (UINT mip = 0; mip < prefilterMapMips; ++mip)
+    {
+        for (UINT face = 0; face < 6; ++face)
+        {
+            D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+            rtvDesc.Format = prefilterMapDesc.Format;
+            rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+            rtvDesc.Texture2DArray.MipSlice = mip; // 关键：第 mip 个切片
+            rtvDesc.Texture2DArray.PlaneSlice = 0;
+            rtvDesc.Texture2DArray.ArraySize = 1;
+            rtvDesc.Texture2DArray.FirstArraySlice = face; // 关键：第 face 个切片
+
+            m_Device->CreateRenderTargetView(m_PrefilteredMapTexture.Get(), &rtvDesc, prefilterRtvHandle);
+            prefilterRtvHandle.Offset(1, iblRtvDescriptorSize); // 移到下一个 RTV 槽
+        }
+    }
+
+    // 2. SRV (1 个, m_SrvHeap, t9)
+    // t0-t4 (PBR), t5 (Shadow), t6 (Skybox), t7 (BRDF), t8 (Irr)。t9 可用。
+    CD3DX12_CPU_DESCRIPTOR_HANDLE prefilterSrvHandle(m_SrvHeap->GetCPUDescriptorHandleForHeapStart());
+    prefilterSrvHandle.Offset(9, m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC prefilterSrvDesc = {};
+    prefilterSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    prefilterSrvDesc.Format = prefilterMapDesc.Format;
+    prefilterSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    prefilterSrvDesc.TextureCube.MipLevels = prefilterMapMips; // 关键：包含所有 Mips
+    prefilterSrvDesc.TextureCube.MostDetailedMip = 0;
+    prefilterSrvDesc.TextureCube.ResourceMinLODClamp = 0.0f;
+    m_Device->CreateShaderResourceView(m_PrefilteredMapTexture.Get(), &prefilterSrvDesc, prefilterSrvHandle);
 
 
     // 3. BRDF LUT SRV (放在 m_SrvHeap, t7)
@@ -1049,9 +1135,8 @@ void D3D12App::OnLoadAssets()
     // 2. 渲染 Irradiance Map
     RenderIrradianceMap();
 
-    // 未来的步骤将在这里调用
-    // RenderIrradianceMap();
-    // RenderPrefilteredMap();
+    // 3. 渲染 Prefilter Map
+    RenderPrefilteredMap();
 
     //关闭并执行 IBL 生成
     ThrowIfFailed(m_CommandList->Close());
@@ -1109,6 +1194,8 @@ void D3D12App::OnUpdate(float deltaTime)
     XMStoreFloat4x4(&m_PlaneWorldMatrix, planeWorldMatrix);
     XMMATRIX sphereWorldMatrix = XMMatrixTranslation(0.0f, 1.0f + 0.2f * sinf(m_TotalTime), 0.0f);
     XMStoreFloat4x4(&m_SphereWorldMatrix, sphereWorldMatrix);
+    XMMATRIX specularSphereWorldMatrix = XMMatrixTranslation(-2.0f, 1.0f, 0.0f);     // 新的镜面反射球体 (放在 PBR 立方体旁边)
+    XMStoreFloat4x4(&m_SpecularSphereWorldMatrix, specularSphereWorldMatrix);
 
     XMStoreFloat4(&m_Constants.eyePos, cameraPos);
 }
@@ -1388,6 +1475,28 @@ void D3D12App::RenderOpaque() {
     m_CommandList->IASetVertexBuffers(0, 1, &m_PlaneVertexBufferView);
     m_CommandList->IASetIndexBuffer(&m_PlaneIndexBufferView);
     m_CommandList->DrawIndexedInstanced(6, 1, 0, 0, 0); // 平面
+
+    // 绘制镜面反射球体 (新添加)
+    // 为球体更新主CBV
+    XMMATRIX specularSphereWorld = XMLoadFloat4x4(&m_SpecularSphereWorldMatrix);
+    wvp = specularSphereWorld * view * proj;
+    lightWvp = specularSphereWorld * lightView * lightProj;
+
+    XMStoreFloat4x4(&m_Constants.wvpMatrix, wvp);
+    XMStoreFloat4x4(&m_Constants.worldMatrix, specularSphereWorld);
+    XMStoreFloat4x4(&m_Constants.lightWvpMatrix, lightWvp);
+    m_Constants.textureInfo.x = 3.0f; // 告诉着色器这是镜面球
+    m_Constants.textureInfo.y = 0.0f; // 重置
+
+    // 使用第 5 个常量缓冲区槽位 (0=Cube, 1=Plane, 2=Glass, 3=Skybox, 4=SpecSphere)
+    memcpy(m_pConstantBufferDataBegin + c_alignedSceneConstantBufferSize * 4, &m_Constants, sizeof(SceneConstants));
+
+    // 绑定球体的数据并绘制 (复用球体 VBO/IBO)
+    m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress() + c_alignedSceneConstantBufferSize * 4);
+    m_CommandList->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_CommandList->IASetVertexBuffers(0, 1, &m_SphereVertexBufferView);
+    m_CommandList->IASetIndexBuffer(&m_SphereIndexBufferView);
+    m_CommandList->DrawIndexedInstanced(geometry.sphereIndices.size(), 1, 0, 0, 0); // 绘制球体
 }
 
 void D3D12App::RenderTransparent() {
@@ -1641,6 +1750,105 @@ void D3D12App::RenderIrradianceMap()
     m_CommandList->ResourceBarrier(1, &barrier);
 }
 
+
+// Pass: 预计算 Prefiltered Map
+void D3D12App::RenderPrefilteredMap()
+{
+    // 设置 PSO 和根签名
+    m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::Prefilter));
+    // 复用 Skybox 根签名!
+    m_CommandList->SetGraphicsRootSignature(m_SkyboxRootSignature.Get());
+
+    // 绑定 SRV 堆 (它包含了天空盒)
+    ID3D12DescriptorHeap* srvHeap[] = { m_SrvHeap.Get() };
+    m_CommandList->SetDescriptorHeaps(_countof(srvHeap), srvHeap);
+
+    // 获取天空盒的 SRV 句柄 (t6)
+    CD3DX12_GPU_DESCRIPTOR_HANDLE skyboxSrvHandle(m_SrvHeap->GetGPUDescriptorHandleForHeapStart());
+    skyboxSrvHandle.Offset(6, m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
+
+    // 根签名在 Slot 1 处需要 SRV (t0)
+    m_CommandList->SetGraphicsRootDescriptorTable(1, skyboxSrvHandle);
+
+    // (复用 RenderIrradianceMap 中的 6 个视图矩阵)
+    XMMATRIX captureViews[] =
+    {
+        XMMatrixLookAtLH(XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(1.0f,  0.0f,  0.0f, 0.0f), XMVectorSet(0.0f,  1.0f,  0.0f, 0.0f)), // +X
+        XMMatrixLookAtLH(XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(-1.0f,  0.0f,  0.0f, 0.0f), XMVectorSet(0.0f,  1.0f,  0.0f, 0.0f)), // -X
+        XMMatrixLookAtLH(XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(0.0f,  1.0f,  0.0f, 0.0f), XMVectorSet(0.0f,  0.0f, -1.0f, 0.0f)), // +Y
+        XMMatrixLookAtLH(XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(0.0f, -1.0f,  0.0f, 0.0f), XMVectorSet(0.0f,  0.0f,  1.0f, 0.0f)), // -Y
+        XMMatrixLookAtLH(XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(0.0f,  0.0f,  1.0f, 0.0f), XMVectorSet(0.0f,  1.0f,  0.0f, 0.0f)), // +Z
+        XMMatrixLookAtLH(XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(0.0f,  0.0f, -1.0f, 0.0f), XMVectorSet(0.0f,  1.0f,  0.0f, 0.0f))  // -Z
+    };
+    XMMATRIX captureProj = XMMatrixPerspectiveFovLH(XMConvertToRadians(90.0f), 1.0f, 0.1f, 10.0f);
+
+    // 资源屏障: 转换 Prefiltered Map
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_PrefilteredMapTexture.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_RENDER_TARGET
+    );
+    m_CommandList->ResourceBarrier(1, &barrier);
+
+    // (复用 Skybox 的 VBO/IBO)
+    m_CommandList->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_CommandList->IASetVertexBuffers(0, 1, &m_VertexBufferView);
+    m_CommandList->IASetIndexBuffer(&m_IndexBufferView);
+
+    // 获取 RTV 堆的起始地址和大小
+    UINT iblRtvDescriptorSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_IblRtvHeap->GetCPUDescriptorHandleForHeapStart());
+    rtvHandle.Offset(1 + 6, iblRtvDescriptorSize); // 跳过 1(BRDF)+6(Irr)
+
+    const UINT prefilterMapSize = 128;
+    const UINT prefilterMapMips = 5;
+
+    // 循环 5 个 Mip 级别
+    for (UINT mip = 0; mip < prefilterMapMips; ++mip)
+    {
+        // 1. 计算该 Mip 的粗糙度
+        float roughness = (float)mip / (float)(prefilterMapMips - 1);
+
+        // 2. 计算该 Mip 的视口大小
+        UINT mipWidth = (UINT)(prefilterMapSize * std::pow(0.5, mip));
+        UINT mipHeight = (UINT)(prefilterMapSize * std::pow(0.5, mip));
+        D3D12_VIEWPORT mipViewport = { 0.0f, 0.0f, (float)mipWidth, (float)mipHeight, 0.0f, 1.0f };
+        D3D12_RECT mipScissorRect = { 0, 0, (LONG)mipWidth, (LONG)mipHeight };
+        m_CommandList->RSSetViewports(1, &mipViewport);
+        m_CommandList->RSSetScissorRects(1, &mipScissorRect);
+
+        // 循环 6 个面
+        for (UINT face = 0; face < 6; ++face)
+        {
+            // 3. 更新 CBV
+            XMMATRIX skyboxWvp = captureViews[face] * captureProj;
+            XMStoreFloat4x4(&m_Constants.wvpMatrix, skyboxWvp);
+            // 技巧: 将 roughness 存储在 textureInfo.y 中
+            m_Constants.textureInfo.y = roughness;
+
+            // (复用天空盒的 CBV 槽位: 3)
+            memcpy(m_pConstantBufferDataBegin + c_alignedSceneConstantBufferSize * 3, &m_Constants, sizeof(SceneConstants));
+            m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress() + c_alignedSceneConstantBufferSize * 3);
+
+            // 4. 设置 RTV (在 RTV 堆中的正确偏移)
+            m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+            // 5. 绘制立方体 (内部)
+            m_CommandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+
+            // 6. 移动到下一个 RTV 句柄
+            rtvHandle.Offset(1, iblRtvDescriptorSize);
+        }
+    }
+
+    // 资源屏障: 转换回
+    barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_PrefilteredMapTexture.Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+    );
+    m_CommandList->ResourceBarrier(1, &barrier);
+}
 
 void D3D12App::WaitForGpu()
 {

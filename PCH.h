@@ -24,6 +24,7 @@ enum class RenderQueue
 	Skybox,
 	BrdfLut,
 	Irradiance,
+	Prefilter,
 };
 namespace std {
 	template <>
