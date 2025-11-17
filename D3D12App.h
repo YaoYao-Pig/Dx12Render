@@ -155,10 +155,19 @@ protected:
     ComPtr<ID3D12Resource> m_SkyboxTexture;
     ComPtr<ID3D12RootSignature> m_SkyboxRootSignature;
 
+
+    ComPtr<ID3D12Resource> m_BrdfLutTexture;
+    ComPtr<ID3D12DescriptorHeap> m_IblRtvHeap; // 用于 IBL 生成的 RTV 堆
+    ComPtr<ID3D12RootSignature> m_BrdfLutRootSignature;
+
  private:
      void RenderOpaque();
      void RenderTransparent();
      void RenderSkyBox();
+
+private:
+    void RenderBrdfLut();
+
 private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     std::string m_pbr_text_tail = ".jpg";

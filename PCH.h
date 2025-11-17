@@ -22,6 +22,7 @@ enum class RenderQueue
 	Shadow,
 	Transparent,
 	Skybox,
+	BrdfLut,
 };
 namespace std {
 	template <>

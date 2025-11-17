@@ -445,3 +445,150 @@ float4 SkyboxPS(PSInputSky input) : SV_Target
     // 我们稍后会在这里做 Gamma 校正, 但现在直接返回
     return skyColor;
 }
+
+
+// (VS) BRDF LUT - 全屏三角形
+// PS的输入
+struct PSInputBrdfLut
+{
+    float4 position : SV_Position;
+    float2 texcoord : TEXCOORD0;
+};
+
+// 这是一个在VS中生成全屏三角形的技巧，不需要IB/VB
+// 它会生成一个覆盖整个NDC空间的大三角形
+PSInputBrdfLut BrdfLutVS(uint vid : SV_VertexID)
+{
+    PSInputBrdfLut output;
+    
+    // 将 0, 1, 2 映射到 texcoord (0, 0), (0, 2), (2, 0)
+    output.texcoord = float2((vid << 1) & 2, (vid & 2));
+    // 将 texcoord 映射到 position (-1, -1), (-1, 3), (3, -1)
+    output.position = float4(output.texcoord * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    
+    return output;
+}
+
+// (PS) BRDF LUT - 积分计算
+// 基于 Epic Games 的 "Real Shading in Unreal Engine 4"
+// 我们的目标是预计算镜面 BRDF 的两个部分：
+// R 通道: scale = 积分( (1 - (1 - VdotH)^5) * G_Vis )
+// G 通道: bias  = 积分( (1 - VdotH)^5 * G_Vis )
+// (注意: 最终 scale = A, bias = B。这里代码计算的是 A 和 B)
+
+// static const float PI = 3.14159265359f; (在前面已经定义)
+
+// Hammersley 序列 (用于低差异序列)
+float2 Hammersley(uint i, uint N)
+{
+    // Van Der Corput 序列 (base 2)
+    uint bits = (i << 16u) | (i >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    float rdi = float(bits) * 2.3283064365386963e-10; // 1.0 / 0x100000000
+    return float2(float(i) / float(N), rdi);
+}
+
+// GGX 重要性采样 (根据粗糙度生成 H)
+float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness)
+{
+    float a = roughness * roughness;
+    
+    float phi = 2.0 * PI * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    
+    // 从球面坐标到笛卡尔坐标
+    float3 H;
+    H.x = cos(phi) * sinTheta;
+    H.y = sin(phi) * sinTheta;
+    H.z = cosTheta;
+    
+    // 从切线空间转换到世界空间 (N=0,0,1)
+    float3 up = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    float3 T = normalize(cross(up, N));
+    float3 B = cross(N, T);
+    
+    float3x3 TBN = float3x3(T, B, N);
+    return normalize(mul(H, TBN));
+}
+
+// G (Schlick-GGX) - (用于IBL)
+float GeometrySchlickGGX_IBL(float NdotV, float roughness)
+{
+    // IBL 使用 k = roughness^2 / 2
+    float r = roughness;
+    float k = (r * r) / 2.0;
+    float num = NdotV;
+    float den = NdotV * (1.0 - k) + k;
+    return num / den;
+}
+
+// G (Smith) - (用于IBL)
+float GeometrySmith_IBL(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = saturate(dot(N, V));
+    float NdotL = saturate(dot(N, L));
+    float ggx2 = GeometrySchlickGGX_IBL(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX_IBL(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
+// 积分函数
+float2 IntegrateBRDF(float NdotV, float roughness)
+{
+    float3 V;
+    V.x = sqrt(1.0 - NdotV * NdotV); // sin
+    V.y = 0.0;
+    V.z = NdotV; // cos
+    
+    float3 N = float3(0.0, 0.0, 1.0);
+    
+    float A = 0.0; // 对应 R 通道
+    float B = 0.0; // 对应 G 通道
+    
+    const uint SAMPLE_COUNT = 1024u;
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+    {
+        float2 Xi = Hammersley(i, SAMPLE_COUNT);
+        float3 H = ImportanceSampleGGX(Xi, N, roughness);
+        float3 L = normalize(2.0 * dot(V, H) * H - V);
+        
+        float NdotL = saturate(L.z);
+        float NdotH = saturate(H.z);
+        float VdotH = saturate(dot(V, H));
+        
+        if (NdotL > 0.0)
+        {
+            // 几何项
+            float G = GeometrySmith_IBL(N, V, L, roughness);
+            // (G * VdotH) / (NdotH * NdotV)
+            float G_Vis = (G * VdotH) / (NdotH * NdotV + 0.0001f);
+            // 菲涅尔 (Schlick)
+            float Fc = pow(1.0 - VdotH, 5.0);
+            
+            // A = 积分( (1 - Fc) * G_Vis )
+            A += (1.0 - Fc) * G_Vis;
+            // B = 积分( Fc * G_Vis )
+            B += Fc * G_Vis;
+        }
+    }
+    
+    return float2(A, B) / float(SAMPLE_COUNT);
+}
+
+float4 BrdfLutPS(PSInputBrdfLut input) : SV_Target
+{
+    // input.texcoord 在 [0, 1] (VS中已映射好)
+    // 映射到 NdotV 和 roughness
+    float NdotV = input.texcoord.x;
+    float roughness = input.texcoord.y;
+    
+    // 计算积分
+    float2 result = IntegrateBRDF(NdotV, roughness);
+    
+    // 将结果存储到 R16G16_FLOAT 纹理中
+    return float4(result.x, result.y, 0.0, 1.0);
+}

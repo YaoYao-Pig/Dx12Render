@@ -261,6 +261,8 @@ void D3D12App::InitD3D12()
     shaderCompiler.Init({ "VSMain", "PSMain" });
     shaderCompiler.AddShaderEntryPoints({ "ShadowVS", "ShadowPS" }); //注册阴影着色器入口点
     shaderCompiler.AddShaderEntryPoints({ "SkyboxVS", "SkyboxPS" });
+    shaderCompiler.AddShaderEntryPoints({ "BrdfLutVS", "BrdfLutPS" });
+
     psoContainer.Init(m_Device);
     geometry.LoadGeometry();
     resourceManager.Init(m_Device, m_CommandList);
@@ -294,6 +296,14 @@ void D3D12App::CreateDescriptorHeaps()
     constHeapDesc.NumDescriptors = 1;
     constHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(m_Device->CreateDescriptorHeap(&constHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_ConstHeap));
+
+    // 为 IBL 生成创建一个 RTV 堆 (目前只有 BRDF LUT)
+    D3D12_DESCRIPTOR_HEAP_DESC iblRtvHeapDesc = {};
+    iblRtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    iblRtvHeapDesc.NumDescriptors = 1; // 暂时只为 BRDF LUT (将来会增加)
+    iblRtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    ThrowIfFailed(m_Device->CreateDescriptorHeap(&iblRtvHeapDesc, IID_PPV_ARGS(&m_IblRtvHeap)));
+    m_IblRtvHeap->SetName(L"IBL RTV Heap");
 }
 
 void D3D12App::CreateRootSignature()
@@ -398,6 +408,20 @@ void D3D12App::CreateRootSignature()
         IID_PPV_ARGS(&m_SkyboxRootSignature)));
     m_SkyboxRootSignature->SetName(L"Skybox Root Signature");
 
+
+    // --- BRDF LUT 根签名 ---
+    // 这个通道不需要任何输入
+    CD3DX12_ROOT_SIGNATURE_DESC brdfLutSignatureDes = {};
+    brdfLutSignatureDes.Init(0, nullptr, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+    ComPtr<ID3DBlob> brdfLutSignature, brdfLutError;
+    ThrowIfFailed(D3D12SerializeRootSignature(&brdfLutSignatureDes, D3D_ROOT_SIGNATURE_VERSION_1, &brdfLutSignature, &brdfLutError));
+
+    ThrowIfFailed(m_Device->CreateRootSignature(0,
+        brdfLutSignature->GetBufferPointer(),
+        brdfLutSignature->GetBufferSize(),
+        IID_PPV_ARGS(&m_BrdfLutRootSignature)));
+    m_BrdfLutRootSignature->SetName(L"BRDF LUT Root Signature");
 }
 
 void D3D12App::CreatePSO()
@@ -559,6 +583,34 @@ void D3D12App::CreatePSO()
 
     psoContainer.BuildPSO(RenderQueue::Skybox, &skyboxPsoDesc);
 
+    // ----------- 创建BRDF LUT的 PSO (RenderQueue::BrdfLut) -----------
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC brdfLutPsoDesc = {};
+    brdfLutPsoDesc.pRootSignature = m_BrdfLutRootSignature.Get();
+    brdfLutPsoDesc.VS.pShaderBytecode = shaderCompiler.GetShader("BrdfLutVS")->GetBufferPointer();
+    brdfLutPsoDesc.VS.BytecodeLength = shaderCompiler.GetShader("BrdfLutVS")->GetBufferSize();
+    brdfLutPsoDesc.PS.pShaderBytecode = shaderCompiler.GetShader("BrdfLutPS")->GetBufferPointer();
+    brdfLutPsoDesc.PS.BytecodeLength = shaderCompiler.GetShader("BrdfLutPS")->GetBufferSize();
+
+    // 我们使用全屏三角形技巧，不需要输入布局
+    brdfLutPsoDesc.InputLayout = { nullptr, 0 };
+
+    // 关闭剔除
+    brdfLutPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    brdfLutPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    brdfLutPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+
+    // 不需要深度
+    brdfLutPsoDesc.DepthStencilState.DepthEnable = FALSE;
+
+    brdfLutPsoDesc.SampleMask = UINT_MAX;
+    brdfLutPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    brdfLutPsoDesc.NumRenderTargets = 1;
+    brdfLutPsoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16_FLOAT; // 高精度的 LUT
+    brdfLutPsoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    brdfLutPsoDesc.SampleDesc.Count = 1;
+
+    psoContainer.BuildPSO(RenderQueue::BrdfLut, &brdfLutPsoDesc);
+
 }
 
 void D3D12App::CreateResources()
@@ -572,6 +624,55 @@ void D3D12App::CreateResources()
     
     resourceManager.UploadResource(geometry.sphereVertexs.data(), geometry.sphereVertexSize, m_SphereVertexBuffer);
     resourceManager.UploadResource(geometry.sphereIndices.data(), geometry.sphereIndiceSize, m_SphereIndexBuffer);
+
+
+    // 创建 IBL 资源
+    // 1. BRDF LUT 纹理
+    D3D12_RESOURCE_DESC brdfLutDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+        DXGI_FORMAT_R16G16_FLOAT, // 16位浮点 * 2
+        512, 512,                 // 512x512 纹理
+        1, 1, 1, 0,
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET // 我们需要渲染到它
+    );
+    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    // 为其创建一个清晰的颜色（尽管我们不会清除它）
+    D3D12_CLEAR_VALUE brdfLutClearValue = {};
+    brdfLutClearValue.Format = DXGI_FORMAT_R16G16_FLOAT;
+    brdfLutClearValue.Color[0] = 0.0f;
+    brdfLutClearValue.Color[1] = 0.0f;
+    brdfLutClearValue.Color[2] = 0.0f;
+    brdfLutClearValue.Color[3] = 1.0f;
+
+    ThrowIfFailed(m_Device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &brdfLutDesc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, // 初始状态为 SRV
+        &brdfLutClearValue,
+        IID_PPV_ARGS(&m_BrdfLutTexture)
+    ));
+    m_BrdfLutTexture->SetName(L"BRDF LUT");
+
+    //为 IBL 资源创建视图
+    // 1. BRDF LUT RTV (放在 m_IblRtvHeap 中)
+    D3D12_CPU_DESCRIPTOR_HANDLE brdfLutRtvHandle = m_IblRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    m_Device->CreateRenderTargetView(m_BrdfLutTexture.Get(), nullptr, brdfLutRtvHandle);
+
+    // 2. BRDF LUT SRV (放在 m_SrvHeap, t7)
+    // t0-t4 (PBR), t5 (Shadow), t6 (Skybox)。所以 t7 是可用的。
+    CD3DX12_CPU_DESCRIPTOR_HANDLE brdfLutSrvHandle(m_SrvHeap->GetCPUDescriptorHandleForHeapStart());
+    brdfLutSrvHandle.Offset(7, m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = brdfLutDesc.Format;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    m_Device->CreateShaderResourceView(m_BrdfLutTexture.Get(), &srvDesc, brdfLutSrvHandle);
+
+
+
 
     //加载各种贴图
     //获取SRVHandler起始位置
@@ -695,7 +796,7 @@ void D3D12App::CreateResources()
 
    
     const UINT constantBufferSize = c_alignedSceneConstantBufferSize * 64;
-    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
     auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(constantBufferSize);
     ThrowIfFailed(m_Device->CreateCommittedResource(
         &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
@@ -849,6 +950,26 @@ void D3D12App::OnLoadAssets()
     shaderCompiler.CompileShader();
     CreatePSO();
     CreateResources();
+    WaitForGpu();
+
+    // 执行 IBL 预计算通道
+    // 重置命令列表以开始 IBL 生成
+    ThrowIfFailed(m_CommandAllocator->Reset());
+    ThrowIfFailed(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr));
+
+    // 1. 渲染 BRDF LUT
+    RenderBrdfLut();
+
+    // 未来的步骤将在这里调用
+    // RenderIrradianceMap();
+    // RenderPrefilteredMap();
+
+    //关闭并执行 IBL 生成
+    ThrowIfFailed(m_CommandList->Close());
+    ID3D12CommandList* ppCommandLists[] = { m_CommandList.Get() };
+    m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
+
+    // 再次等待，确保 IBL 生成完成
     WaitForGpu();
     resourceManager.ClearTmpBuffers();
 }
@@ -1282,9 +1403,6 @@ void D3D12App::RenderMainPass()
 
     RenderTransparent();
 
-    //绘制天空盒 (Skybox Pass)
-
-
 
 
     // 资源屏障 (Present)
@@ -1298,6 +1416,51 @@ void D3D12App::RenderMainPass()
     //关闭命令列表
     ThrowIfFailed(m_CommandList->Close());
 }
+
+
+// Pass: 预计算 BRDF LUT
+void D3D12App::RenderBrdfLut()
+{
+    // 设置 PSO 和根签名
+    m_CommandList->SetPipelineState(psoContainer.GetPSO(RenderQueue::BrdfLut));
+    m_CommandList->SetGraphicsRootSignature(m_BrdfLutRootSignature.Get());
+
+    // 设置 512x512 的视口
+    D3D12_VIEWPORT lutViewport = { 0.0f, 0.0f, 512.0f, 512.0f, 0.0f, 1.0f };
+    D3D12_RECT lutScissorRect = { 0, 0, 512, 512 };
+    m_CommandList->RSSetViewports(1, &lutViewport);
+    m_CommandList->RSSetScissorRects(1, &lutScissorRect);
+
+    // 资源屏障: 转换 BRDF LUT
+    // 从 PIXEL_SHADER_RESOURCE (创建时的状态) 转换为 RENDER_TARGET
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_BrdfLutTexture.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_RENDER_TARGET
+    );
+    m_CommandList->ResourceBarrier(1, &barrier);
+
+    // 设置 RTV (来自 m_IblRtvHeap)
+    D3D12_CPU_DESCRIPTOR_HANDLE brdfLutRtvHandle = m_IblRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    m_CommandList->OMSetRenderTargets(1, &brdfLutRtvHandle, FALSE, nullptr);
+
+    // 我们不需要清除，因为全屏绘制会覆盖所有像素
+    // 绘制一个全屏三角形 (3个顶点)
+    m_CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_CommandList->IASetVertexBuffers(0, 0, nullptr); // 没有顶点缓冲
+    m_CommandList->IASetIndexBuffer(nullptr); // 没有索引缓冲
+    m_CommandList->DrawInstanced(3, 1, 0, 0);
+
+    // 资源屏障: 转换回
+    // 从 RENDER_TARGET 转换回 PIXEL_SHADER_RESOURCE (以便主通道读取)
+    barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_BrdfLutTexture.Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+    );
+    m_CommandList->ResourceBarrier(1, &barrier);
+}
+
 
 void D3D12App::WaitForGpu()
 {
