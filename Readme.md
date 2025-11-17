@@ -731,7 +731,9 @@ void D3D12App::RenderSkyBox() {
 
 
 
+# IBL
 
+![IBL](assets/IBL.gif)
 
 
 
