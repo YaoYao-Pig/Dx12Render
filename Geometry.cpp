@@ -104,9 +104,9 @@ void Geometry::LoadCubeGeometry()
 
     unsigned short cubeIndices[] =
     {
-        0, 1, 2, 0, 3, 1, // Õý
+        0, 1, 2, 0, 2, 3, // Õý
         4, 5, 6, 4, 6, 7, // ±³
-        8, 9, 10, 8, 11, 9, // ×ó
+        8, 9, 10, 8, 10, 11, // ×ó
         12, 13, 14, 12, 14, 15, // ÓÒ
         16, 17, 18, 16, 18, 19, // ¶¥
         20, 21, 22, 20, 22, 23  // µ×
@@ -136,7 +136,7 @@ void Geometry::LoadPlaneGeometry()
 
     unsigned short planeIdx[] = { 
         0, 1, 2, 
-        0, 3, 1 };
+        0, 2, 3 };
     planeIndices.assign(planeIdx, planeIdx + 6);
 
     planeVertexSize = (UINT)planeVertexs.size() * sizeof(Vertex);

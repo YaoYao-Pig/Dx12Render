@@ -157,6 +157,7 @@ protected:
 
 
     ComPtr<ID3D12Resource> m_BrdfLutTexture;
+    ComPtr<ID3D12Resource> m_IrradianceMapTexture;
     ComPtr<ID3D12DescriptorHeap> m_IblRtvHeap; // 用于 IBL 生成的 RTV 堆
     ComPtr<ID3D12RootSignature> m_BrdfLutRootSignature;
 
@@ -167,6 +168,7 @@ protected:
 
 private:
     void RenderBrdfLut();
+    void RenderIrradianceMap();
 
 private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);

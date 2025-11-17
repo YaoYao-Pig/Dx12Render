@@ -71,6 +71,9 @@ Texture2D g_AoMap : register(t3);
 Texture2D g_NormalMap : register(t4);
 Texture2D g_ShadowMap : register(t5);
 
+Texture2D g_BrdfLutTexture : register(t7); // <-- 添加 IBL
+TextureCube g_IrradianceMap : register(t8); // <-- 添加 IBL
+
 SamplerState g_SamplerMain : register(s0);
 SamplerComparisonState g_SamplerCmp : register(s1);
 
@@ -379,13 +382,19 @@ float4 PSMain(PSInput input) : SV_Target
     
     float3 V = normalize(eyePosW - input.worldPos); // 视图方向
     
-    // 3. 计算 F0 (基础反射率) (同前)
+    // 3. 计算 F0 (基础反射率)
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
     
-    // 4. 初始化出射光线 (Lo) (同前)
-    float3 Lo = AmbientLight * albedo * ao;
+    float3 kS = fresnelSchlick(saturate(dot(N, V)), F0); // 镜面反射部分
+    float3 kD = (1.0 - kS) * (1.0 - metallic); // 漫反射部分 (金属没有漫反射)
+    float3 irradiance = g_IrradianceMap.Sample(g_SamplerMain, N).rgb;
+    float3 diffuse = irradiance * albedo; // * kD; (kD 理论上应该在这里，但通常 albedo * kD 已经分离了)
     
-    // 5. 累加所有光源 (同前)
+    
+    // 4. 初始化出射光线 (Lo)
+    float3 Lo = (kD * diffuse) * ao;
+    
+    // 5. 累加所有光源
     // (这些函数现在将使用我们从法线贴图计算出的 N)
     Lo += ProcessDirectionalLight(DirLight, N, V, input.worldPos, input.lightSpacePos, F0, albedo, roughness, metallic);
     Lo += ProcessPointLight(pointLight, N, V, input.worldPos, F0, albedo, roughness, metallic);
@@ -591,4 +600,58 @@ float4 BrdfLutPS(PSInputBrdfLut input) : SV_Target
     
     // 将结果存储到 R16G16_FLOAT 纹理中
     return float4(result.x, result.y, 0.0, 1.0);
+}
+
+//IBL - Irradiance Map 卷积
+float4 IrradiancePS(PSInputSky input) : SV_Target
+{
+    // N 是我们采样的方向 (来自 VS 的 texcoord)
+    float3 N = normalize(input.texcoord);
+    
+    // 我们需要TBN来转换采样
+    // (同 BrdfLutPS 中的转换)
+    float3 up = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    float3 T = normalize(cross(up, N));
+    float3 B = cross(N, T);
+    float3x3 TBN = float3x3(T, B, N);
+
+    float3 irradiance = float3(0.0, 0.0, 0.0);
+    
+    // 蒙特卡洛积分
+    // (我们使用低差异序列 Hammersley, 但也可以用随机)
+    
+    const uint SAMPLE_COUNT = 1024u; // (可以降低以提高速度, e.g. 256)
+    float sampleDelta = 0.025f; // (用于切线空间采样的参数, 可调整)
+
+    float3 sampleVec = float3(0, 0, 0);
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+    {
+        // 获取低差异采样点
+        float2 Xi = Hammersley(i, SAMPLE_COUNT);
+        
+        // 生成余弦加权的半球采样
+        float phi = 2.0 * PI * Xi.x;
+        float cosTheta = sqrt(1.0 - Xi.y);
+        float sinTheta = sqrt(Xi.y); // sqrt(1.0 - cosTheta*cosTheta)
+        
+        // 从球面坐标到笛卡尔坐标 (切线空间)
+        float3 H;
+        H.x = cos(phi) * sinTheta;
+        H.y = sin(phi) * sinTheta;
+        H.z = cosTheta;
+        
+        // 从切线空间转换到世界空间
+        float3 L = normalize(mul(H, TBN)); // L
+        
+        // 用 L 采样天空盒，并累加 (N.L 因子已包含在重要性采样中)
+        irradiance += g_SkyboxTexture.Sample(g_SamplerMainSky, L).rgb;
+    }
+    
+    // 平均采样结果
+    irradiance = irradiance / float(SAMPLE_COUNT);
+    
+    // (在 LDR 中, 我们不需要 * PI, 但在 HDR 中需要)
+    // irradiance = PI * irradiance / float(SAMPLE_COUNT); 
+    
+    return float4(irradiance, 1.0);
 }
