@@ -733,7 +733,229 @@ void D3D12App::RenderSkyBox() {
 
 # IBL
 
+参考
+
+https://learnopengl-cn.github.io/07%20PBR/03%20IBL/01%20Diffuse%20irradiance/
+
+https://zhuanlan.zhihu.com/p/360944842
+
 ![IBL](assets/IBL.gif)
+
+## 漫反射项
+
+基础 PBR 只计算**直接光源**（如太阳、点光源）贡献的漫反射
+$$
+\text{Lo}_{\text{diffuse}}= \int_{\Omega} L_{\text{i}}(\omega_{\text{i}}) \cdot k_{\text{D}} \cdot \frac{c_{\text{albedo}}}{\pi} \cdot (\vec{n} \cdot \omega_{\text{i}}) \, d\omega_{\text{i}}
+$$
+
+> $\text{Lo}_{\text{diffuse}}$: 最终从表面反射出的漫反射光。
+>
+> **$L_{\text{i}}(\omega_{\text{i}})$**: 从方向 $\omega_{\text{i}}$ 射入的光线辐照度（对于直接光，这是光线的强度）。
+>
+> **$\vec{n} \cdot \omega_{\text{i}}$**: 兰伯特余弦定律，光线与法线的夹角。
+>
+> **$k_{\text{D}}$**: 漫反射菲涅尔项（非金属部分）。
+>
+> **$\frac{c_{\text{albedo}}}{\pi}$**: 漫反射 BRDF（Lambertian 模型）。
+
+IBL PBR (间接光) 的漫反射项：当引入 IBL 时，我们关注的是**间接环境光**的漫反射，这对应于上述积分中**非直接光源**部分，且需要在**整个半球 $\Omega$** 上进行积分。
+$$
+\text{Lo}_{\text{indirect\_diffuse}} = \int_{\Omega} L_{\text{i}}^{\text{env}}(\omega_{\text{i}}) \cdot k_{\text{D}} \cdot \frac{c_{\text{albedo}}}{\pi} \cdot (\vec{n} \cdot \omega_{\text{i}}) \, d\omega_{\text{i}}
+$$
+
+> **$L_{\text{i}}^{\text{env}}(\omega_{\text{i}})$**: 来自环境贴图（天空盒）的入射光。
+
+其实有点类似于光线追踪，假设一个点，和它的法线，我们就要计算各个光源对这个点的光照贡献。IBL其实本质上是把天空盒看作是由无数个点光源组成的。同时环境光我们都是把他视为是无限远，这使得，采样的位置对于环境光来说不重要（意思是不想真正的点光源一样，光源的位置和采样点的位置，会影响到入射的光的方向），我们只需要关注当前采样点的法线即可。
+
+因为 $k_{\text{D}}$ 和 $c_{\text{albedo}}$ 在积分中是常数，我们可以将它们提出来：
+$$
+\text{Lo}_{\text{indirect\_diffuse}} = k_{\text{D}} \cdot c_{\text{albedo}} \cdot \underbrace{\left[ \int_{\Omega} L_{\text{i}}^{\text{env}}(\omega_{\text{i}}) \cdot \frac{1}{\pi} \cdot (\vec{n} \cdot \omega_{\text{i}}) \, d\omega_{\text{i}} \right]}_{\text{Irradiance Map (辐照度) 预计算}}
+$$
+**IBL 的简化就在于此：** 将这个复杂的、针对每个像素的半球积分，替换为一个只需要根据法线 $\vec{n}$ 查询的预计算纹理，即**辐照度图 (Irradiance Map)**。
+
+我在这部分，生成一张 32x32 的 Cubemap，每个像素存储对应法线方向 $\vec{n}$ 的积分结果。
+
+shader上VS阶段很简单，和SkyBox的VSshader完全一样
+
+```c++
+struct VSInputSky
+{
+    float3 position : POSITION;
+};
+
+struct PSInputSky
+{
+    float4 position : SV_Position; // 裁剪空间
+    float3 texcoord : TEXCOORD0; // 纹理坐标 (将是方向向量)
+};
+PSInputSky SkyboxVS(VSInputSky input)
+{
+    PSInputSky output;
+
+    // 计算裁剪空间位置 
+    output.position = mul(wvpMatrix, float4(input.position, 1.0f));
+
+    // 我们将 Z 坐标强制设置为 W 坐标。
+    // 在透视除法 (z/w) 之后, Z 值将恒为 1.0f。
+    // 这确保了天空盒总是在深度缓冲区的最远处1.0f
+    // 任何其他物体都会画在它前面。
+    output.position.z = output.position.w;
+
+    // 将顶点位置作为采样立方体贴图的 3D 纹理坐标
+    // 应该使用 input.position, 因为它代表了从(0,0,0)出发的方向
+    output.texcoord = input.position;
+
+    return output;
+}
+```
+
+
+
+![image-20251119230251083](assets/image-20251119230251083.png)
+
+PS比较特殊：
+```c++
+
+//IBL - Irradiance Map 卷积
+float4 IrradiancePS(PSInputSky input) : SV_Target
+{
+    // N 是我们采样的方向 (来自 SkyVS 的 texcoord)
+    float3 N = normalize(input.texcoord);
+    
+    // 我们需要TBN来转换采样
+    // (同 BrdfLutPS 中的转换)
+    float3 up = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    float3 T = normalize(cross(up, N));
+    float3 B = cross(N, T);
+    float3x3 TBN = float3x3(T, B, N); //定义了“局部 Z 轴”在世界空间中实际指向哪里。
+
+    float3 irradiance = float3(0.0, 0.0, 0.0);
+    
+    // 蒙特卡洛积分
+    // 使用低差异序列 Hammersley, 但也可以用随机
+    
+    const uint SAMPLE_COUNT = 1024u;
+    float sampleDelta = 0.025f; //用于切线空间采样的参数
+
+    float3 sampleVec = float3(0, 0, 0);
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+    {
+        // 获取低差异采样点
+        float2 Xi = Hammersley(i, SAMPLE_COUNT);
+        
+        // 生成余弦加权的半球采样
+        float phi = 2.0 * PI * Xi.x;
+        float cosTheta = sqrt(1.0 - Xi.y);
+        float sinTheta = sqrt(Xi.y); // sqrt(1.0 - cosTheta*cosTheta)
+        
+        // 从球面坐标到笛卡尔坐标 (切线空间)
+        float3 H;
+        H.x = cos(phi) * sinTheta;
+        H.y = sin(phi) * sinTheta;
+        H.z = cosTheta;
+        
+        // 从切线空间转换到世界空间
+        float3 L = normalize(mul(H, TBN)); // L
+        
+        // 用 L 采样天空盒，并累加 (N.L 因子已包含在重要性采样中)
+        irradiance += g_SkyboxTexture.Sample(g_SamplerMainSky, L).rgb;
+    }
+    
+    // 平均采样结果
+    irradiance = irradiance / float(SAMPLE_COUNT);
+    
+    // (在 LDR 中, 我们不需要 * PI, 但在 HDR 中需要)
+    // irradiance = PI * irradiance / float(SAMPLE_COUNT); 
+    
+    return float4(irradiance, 1.0);
+}
+```
+
+下面来解释这个过程：我们的输入是PSInputSky，其实利用的是里面的texcoord，这里面存储的其实是采样时的方向向量，其实就是这里的采样点的法线。这个法线的方向是不均匀的，像下面这个图的蓝色箭头
+
+> 这里最正确的想法是，把 Irradiance Map 或任何环境 Cubemap 想象成一个巨大的、包裹了整个世界的球体（或球面）。其实这才是CubeMap的最好的解释，不直接存储球体的原因是因为这样很麻烦，而且容易扭曲。但是通过存储采样方向的方式就可以用立方体存储一个球体
+
+![image-20251119230305768](assets/image-20251119230305768.png)
+
+因为是在一个半球上积分，所以用了蒙特卡洛积分法，这里使用了一种比较收束的随机生成采样点的方法，下面会介绍。
+
+这里先解释一下这里：
+```cpp
+        // 生成余弦加权的半球采样
+        float phi = 2.0 * PI * Xi.x;
+        float cosTheta = sqrt(1.0 - Xi.y);
+        float sinTheta = sqrt(Xi.y); // sqrt(1.0 - cosTheta*cosTheta)
+
+        
+        // 从球面坐标到笛卡尔坐标 (切线空间)
+        float3 H;
+        H.x = cos(phi) * sinTheta;
+        H.y = sin(phi) * sinTheta;
+        H.z = cosTheta;
+```
+
+这是在做啥？且看下面这个图里的红框式子。n /dot wi，这里是个点乘，很显然的，越是方向和法线靠近的光线，对最后颜色的贡献就越大。这里这个余弦加权就是在做这件事情。这里涉及到比较复杂的数学运算，可以问下AI
+
+![image-20251119230839137](assets/image-20251119230839137.png)
+
+下面解释坐标系的空间转换问题：下面这部分我们相当于首先生成了一个，切线坐标系下的，法线方向周围的，加权后的随机光线采样方向。
+
+```cpp
+// 获取低差异采样点
+float2 Xi = Hammersley(i, SAMPLE_COUNT);
+```
+
+但是最后，这个光线是需要去天空盒上面采样的对吧，因此在经过上面的加权之后，我们得到了的是一个，切线坐标系下的采样方向。在经过一个TBN变换，就转换到世界坐标系下了。
+
+```cpp
+ // 从切线空间转换到世界空间
+        float3 L = normalize(mul(H, TBN)); // L
+```
+
+然后根据世界坐标系下的L方向去采样天空盒贴图。结果之和平均存储在32x32大小的贴图里（这里类似ShadowMap，区别是，ShadowMap是深度最后写入一个DSV的贴图，并且作为贴图处理，这里是采样结果写入一个贴图）
+
+
+```cpp
+ // 平均采样结果
+    irradiance = irradiance / float(SAMPLE_COUNT);
+// (在 LDR 中, 我们不需要 * PI, 但在 HDR 中需要)
+// irradiance = PI * irradiance / float(SAMPLE_COUNT); 
+
+return float4(irradiance, 1.0);
+```
+
+### 使用
+
+替换了原来的PBR漫反射计算：
+
+```cpp
+float4 PSMain(PSInput input) : SV_Target
+{
+    //...
+// IBL 漫反射 
+    // 使用世界空间法线 N，在辐照度图 (t8) 上进行采样
+    float3 irradiance = g_IrradianceMap.Sample(g_SamplerMain, N).rgb; 
+    
+    // 计算间接漫反射光
+    // 间接漫反射 = kD * (辐照度 * Albedo)
+    float3 diffuse = irradiance * albedo;
+    
+    // 组合 IBL
+    // Lo = 直接光 + 间接光(IBL)
+    
+    // 间接光照 = (kD * 间接漫反射 + 间接镜面反射) * AO
+    float3 ambient = (kD * diffuse + specular) * ao; // specular 是来自 Prefiltered Map 的镜面项
+```
+
+## 镜面反射项
+
+# API
+
+## 设置渲染目标和深度写入目标：
+
+```cpp
+m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+```
 
 
 

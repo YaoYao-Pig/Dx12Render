@@ -514,8 +514,6 @@ PSInputBrdfLut BrdfLutVS(uint vid : SV_VertexID)
 // G 通道: bias  = 积分( (1 - VdotH)^5 * G_Vis )
 // (注意: 最终 scale = A, bias = B。这里代码计算的是 A 和 B)
 
-// static const float PI = 3.14159265359f; (在前面已经定义)
-
 // Hammersley 序列 (用于低差异序列)
 float2 Hammersley(uint i, uint N)
 {
@@ -634,7 +632,7 @@ float4 BrdfLutPS(PSInputBrdfLut input) : SV_Target
 //IBL - Irradiance Map 卷积
 float4 IrradiancePS(PSInputSky input) : SV_Target
 {
-    // N 是我们采样的方向 (来自 VS 的 texcoord)
+    // N 是我们采样的方向 (来自 SkyVS 的 texcoord)
     float3 N = normalize(input.texcoord);
     
     // 我们需要TBN来转换采样
@@ -642,15 +640,15 @@ float4 IrradiancePS(PSInputSky input) : SV_Target
     float3 up = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
     float3 T = normalize(cross(up, N));
     float3 B = cross(N, T);
-    float3x3 TBN = float3x3(T, B, N);
+    float3x3 TBN = float3x3(T, B, N); //定义了局部 Z 轴在世界空间中实际指向哪里。
 
     float3 irradiance = float3(0.0, 0.0, 0.0);
     
     // 蒙特卡洛积分
-    // (我们使用低差异序列 Hammersley, 但也可以用随机)
+    // 使用低差异序列 Hammersley, 但也可以用随机
     
-    const uint SAMPLE_COUNT = 1024u; // (可以降低以提高速度, e.g. 256)
-    float sampleDelta = 0.025f; // (用于切线空间采样的参数, 可调整)
+    const uint SAMPLE_COUNT = 1024u;
+    float sampleDelta = 0.025f; //用于切线空间采样的参数
 
     float3 sampleVec = float3(0, 0, 0);
     for (uint i = 0u; i < SAMPLE_COUNT; ++i)
