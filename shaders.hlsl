@@ -339,7 +339,7 @@ float3 ProcessSpotLight(SpotLight light, float3 N, float3 V, float3 worldPos, fl
 // 主通道 - 像素着色器PBR
 float4 PSMain(PSInput input) : SV_Target
 {
-    // 1. 从贴图采样材质属性
+    // 从贴图采样材质属性
     float4 albedoMap = g_AlbedoMap.Sample(g_SamplerMain, input.texcoord);
     float3 albedo = albedoMap.rgb;
     float alpha = albedoMap.a; //获取Alpha!
@@ -353,7 +353,7 @@ float4 PSMain(PSInput input) : SV_Target
     float roughness = g_RoughnessMap.Sample(g_SamplerMain, input.texcoord).r;
     float ao = g_AoMap.Sample(g_SamplerMain, input.texcoord).r;
     
-    // 2. 获取几何属性
+    // 获取几何属性
     float3 N; // 法线
     if (textureInfo.x == 1.0f) // 只有立方体使用法线贴图
     {
@@ -371,9 +371,9 @@ float4 PSMain(PSInput input) : SV_Target
             ao = 1.0f;
             alpha = 1.0f;
         }
-        else if (textureInfo.x == 3.0f) // <-- 新的镜面球
+        else if (textureInfo.x == 3.0f) // 新的镜面球
         {
-            albedo = float3(1.0, 1.0, 1.0); // 金属 albedo (白色)
+            albedo = float3(1.0, 1.0, 1.0); // 金属 albedo
             metallic = 1.0f; // 高金属度
             roughness = 0.05f; // 低粗糙度
             ao = 1.0f;
@@ -391,15 +391,15 @@ float4 PSMain(PSInput input) : SV_Target
     
     float3 V = normalize(eyePosW - input.worldPos); // 视图方向
     
-    // 3. 计算 F0 (基础反射率)
+    // 计算 F0基础反射率
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
     
-    // 4.IBL环境光
-    // 4a. IBL 漫反射 (来自 Irradiance Map t8)
+    // IBL环境光
+    // IBL 漫反射 (来自 Irradiance Map t8)
     float3 irradiance = g_IrradianceMap.Sample(g_SamplerMain, N).rgb;
     float3 diffuse = irradiance * albedo;
     
-    // 4b. IBL 镜面反射 (来自 Prefiltered Map t9 和 BRDF LUT t7)
+    // IBL 镜面反射 (来自 Prefiltered Map t9 和 BRDF LUT t7)
     float3 R = reflect(-V, N); // 反射向量
     const float MAX_MIP_LEVEL = 4.0; // 对应 5 个 Mip (0, 1, 2, 3, 4)
     float mipLevel = roughness * MAX_MIP_LEVEL;
@@ -414,22 +414,22 @@ float4 PSMain(PSInput input) : SV_Target
     float3 kS = fresnelSchlick(saturate(dot(N, V)), F0); // F (菲涅尔)
     float3 specular = prefilteredColor * (kS * brdf.x + brdf.y);
     
-    // 4c. IBL 漫反射的菲涅尔
+    // IBL 漫反射的菲涅尔
     float3 kD = (1.0 - kS) * (1.0 - metallic);
     
-    // 4d. 组合 IBL
+    // 组合 IBL
     float3 ambient = (kD * diffuse + specular) * ao;
     
-    // 5. 初始化出射光线 (Lo)
+    // 初始化出射光线 (Lo)
     // Lo = 直接光 + 间接光(IBL)
     float3 Lo = ambient;
     
-    // 6. 累加所有直接光源
+    // 累加所有直接光源
     Lo += ProcessDirectionalLight(DirLight, N, V, input.worldPos, input.lightSpacePos, F0, albedo, roughness, metallic);
     Lo += ProcessPointLight(pointLight, N, V, input.worldPos, F0, albedo, roughness, metallic);
     Lo += ProcessSpotLight(spotLight, N, V, input.worldPos, F0, albedo, roughness, metallic);
     
-    // 7. 后处理 (HDR -> LDR)
+    // 后处理 (HDR -> LDR)
     float3 finalColor = Lo / (Lo + float3(1.0, 1.0, 1.0)); // 曝光
     finalColor = pow(finalColor, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2)); // Gamma
     

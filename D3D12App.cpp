@@ -808,7 +808,7 @@ void D3D12App::CreateResources()
             rtvDesc.Texture2DArray.MipSlice = mip; // 关键：第 mip 个切片
             rtvDesc.Texture2DArray.PlaneSlice = 0;
             rtvDesc.Texture2DArray.ArraySize = 1;
-            rtvDesc.Texture2DArray.FirstArraySlice = face; // 关键：第 face 个切片
+            rtvDesc.Texture2DArray.FirstArraySlice = face; // 第 face 个切片
 
             m_Device->CreateRenderTargetView(m_PrefilteredMapTexture.Get(), &rtvDesc, prefilterRtvHandle);
             prefilterRtvHandle.Offset(1, iblRtvDescriptorSize); // 移到下一个 RTV 槽
@@ -824,7 +824,7 @@ void D3D12App::CreateResources()
     prefilterSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     prefilterSrvDesc.Format = prefilterMapDesc.Format;
     prefilterSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-    prefilterSrvDesc.TextureCube.MipLevels = prefilterMapMips; // 关键：包含所有 Mips
+    prefilterSrvDesc.TextureCube.MipLevels = prefilterMapMips; // 包含所有 Mips
     prefilterSrvDesc.TextureCube.MostDetailedMip = 0;
     prefilterSrvDesc.TextureCube.ResourceMinLODClamp = 0.0f;
     m_Device->CreateShaderResourceView(m_PrefilteredMapTexture.Get(), &prefilterSrvDesc, prefilterSrvHandle);
@@ -1770,7 +1770,7 @@ void D3D12App::RenderPrefilteredMap()
     // 根签名在 Slot 1 处需要 SRV (t0)
     m_CommandList->SetGraphicsRootDescriptorTable(1, skyboxSrvHandle);
 
-    // (复用 RenderIrradianceMap 中的 6 个视图矩阵)
+    // 复用 RenderIrradianceMap 中的 6 个视图矩阵
     XMMATRIX captureViews[] =
     {
         XMMatrixLookAtLH(XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), XMVectorSet(1.0f,  0.0f,  0.0f, 0.0f), XMVectorSet(0.0f,  1.0f,  0.0f, 0.0f)), // +X
@@ -1782,7 +1782,7 @@ void D3D12App::RenderPrefilteredMap()
     };
     XMMATRIX captureProj = XMMatrixPerspectiveFovLH(XMConvertToRadians(90.0f), 1.0f, 0.1f, 10.0f);
 
-    // 资源屏障: 转换 Prefiltered Map
+    // 转换 Prefiltered Map
     auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
         m_PrefilteredMapTexture.Get(),
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
@@ -1790,7 +1790,7 @@ void D3D12App::RenderPrefilteredMap()
     );
     m_CommandList->ResourceBarrier(1, &barrier);
 
-    // (复用 Skybox 的 VBO/IBO)
+    // 复用 Skybox 的 VBO/IBO
     m_CommandList->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_CommandList->IASetVertexBuffers(0, 1, &m_VertexBufferView);
     m_CommandList->IASetIndexBuffer(&m_IndexBufferView);

@@ -733,6 +733,10 @@ void D3D12App::RenderSkyBox() {
 
 # IBL
 
+## PBR的缺点
+
+基础的PBR只能考虑直接光照，但是，真实感的光照我们是要考虑到环境光源的。
+
 参考
 
 https://learnopengl-cn.github.io/07%20PBR/03%20IBL/01%20Diffuse%20irradiance/
@@ -742,6 +746,8 @@ https://zhuanlan.zhihu.com/p/360944842
 ![IBL](assets/IBL.gif)
 
 ## 漫反射项
+
+> 本质上，IBL的漫反射部分是一个Map或者说是一个查找表，key就是法线（意思是后面主PS阶段，片元的法线，value是对应这个法线的环境光的积分，也就是color）
 
 基础 PBR 只计算**直接光源**（如太阳、点光源）贡献的漫反射
 $$
@@ -947,7 +953,338 @@ float4 PSMain(PSInput input) : SV_Target
     float3 ambient = (kD * diffuse + specular) * ao; // specular 是来自 Prefiltered Map 的镜面项
 ```
 
-## 镜面反射项
+注意注意，这里采样的时候，是用法线方向去采样的。再想下前面的假设，因为的环境光，所以只受法线影响（辐照度图是“法线查找表”），这点和镜面反射不同，镜面反射最后要依赖反射向量（也就是观察视角根据法线的镜像向量）
+
+## 反射项
+
+在基础的PBR当中，反射项就是DGF这三个共同决定的。如果正常计算，至少是要通过对应光源+观察角度+材质采样的方式来计算一个准确的结果的，但是这显然不经济。非常耗时
+
+
+
+具体推导还是看OpenGL吧，我也不是很有能力完全看明白，这里只是实现和基本的感性认知
+
+PBR方程的镜面项的计算也是基于一个预计算。
+
+直观的来想，PBR要考虑DGF项。因此反射这部分其实是一个和观察角度，片元法线以及光线角度，以及片元粗糙度相关的函数
+
+![image-20251120192020831](assets/image-20251120192020831.png)
+
+![image-20251120192117737](assets/image-20251120192117737.png)
+
+Epic反正做了一个拆分，把整个PBR的项拆成了两个积分的乘积，这样可以分别处理
+
+### LUT查找表
+
+https://zhuanlan.zhihu.com/p/360944842
+
+https://zhuanlan.zhihu.com/p/361227286
+
+先看(4)的后半部分，具体推导这里不说了，总之，我们可以直观理解这个式子，就是如果我们假设法线是个定值，那么影响到最后结果的变量其实就是平面的粗糙度和观察角度（其实也就是入射角度wi，因为考虑的是反射）。如果在这里的入射角度wi，真正有变化的部分其实是，wi和法线N的夹角。这样其实这个问题就被简化为了
+$$
+L = 某个常量 * (n*w_i) * F_0 
+$$
+这显然是一个二元的函数，因此可以把这个过程存储一个二维的查找表里面，这里就叫LUT。存入的计算过程就还是用蒙特卡洛积分，蒙特卡洛积分最重要的是要选择一个合适的概率密度函数。这个概率密度函数应该和粗糙度相关，因此我们实现了GGX 重要性采样 (根据粗糙度生成 H),H就是随机光线的方向
+
+```cpp
+// GGX 重要性采样 (根据粗糙度生成 H)
+float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness)
+{
+    float a = roughness * roughness;
+    
+    float phi = 2.0 * PI * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    
+    // 从球面坐标到笛卡尔坐标
+    float3 H;
+    H.x = cos(phi) * sinTheta;
+    H.y = sin(phi) * sinTheta;
+    H.z = cosTheta;
+    
+    // 从切线空间转换到世界空间 (N=0,0,1)
+    float3 up = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    float3 T = normalize(cross(up, N));
+    float3 B = cross(N, T);
+    
+    float3x3 TBN = float3x3(T, B, N);
+    return normalize(mul(H, TBN));
+}
+```
+
+
+
+
+
+```cpp
+// 积分函数
+float2 IntegrateBRDF(float NdotV, float roughness)
+{
+    float3 V;
+    V.x = sqrt(1.0 - NdotV * NdotV); // sin
+    V.y = 0.0;
+    V.z = NdotV; // cos
+    
+    float3 N = float3(0.0, 0.0, 1.0);
+    
+    float A = 0.0; // 对应 R 通道
+    float B = 0.0; // 对应 G 通道
+    
+    const uint SAMPLE_COUNT = 1024u;
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+    {
+		// 1. 生成低差异序列样本点 (Quasi-Monte Carlo)
+    	float2 Xi = Hammersley(i, SAMPLE_COUNT); 
+    	// 2. 重要性采样：根据粗糙度生成半向量 H
+    	//这里模拟的是D项，也就是微表面分布
+        //如果是粗糙表面，它生成的采样向量 H 会很发散；如果是光滑表面，H 会集中在 N 附近。这模拟了微表面的物理特性。
+        float3 H = ImportanceSampleGGX(Xi, N, roughness); 
+        
+    	// 3. 计算光线方向 L (V 关于 H 的反射)
+    	float3 L = normalize(2.0 * dot(V, H) * H - V); //既然我选中了这个朝向 $H$ 的小镜子，而且你在 $V$ 方向看，那么光线 $L$ 必须是从这个方向射过来的，才能被你看见。
+        
+        float NdotL = saturate(L.z);
+        float NdotH = saturate(H.z);
+        float VdotH = saturate(dot(V, H));
+        
+        if (NdotL > 0.0)
+        {
+            // G项：几何项
+            //它计算的是，在当前这个粗糙度下，这根射出去的光线 L 和视线 V，被微表面自身遮挡住的概率有多大。越粗糙，视角越平，被遮挡的概率就越大，G 值就越小，最终贡献的光就越少
+            float G = GeometrySmith_IBL(N, V, L, roughness);
+            // (G * VdotH) / (NdotH * NdotV)
+            float G_Vis = (G * VdotH) / (NdotH * NdotV + 0.0001f);
+            
+            
+            // F项的近似：菲涅尔 (Schlick)
+            float Fc = pow(1.0 - VdotH, 5.0);
+            
+            // A = 积分( (1 - Fc) * G_Vis )
+            A += (1.0 - Fc) * G_Vis;
+            // B = 积分( Fc * G_Vis )
+            B += Fc * G_Vis;
+        }
+    }
+    
+    return float2(A, B) / float(SAMPLE_COUNT); //不采样具体的颜色，反映的是光照强度到底能留下多少
+}
+
+// 这是一个在VS中生成全屏三角形的技巧，不需要IB/VB
+// 它会生成一个覆盖整个NDC空间的大三角形
+PSInputBrdfLut BrdfLutVS(uint vid : SV_VertexID)
+{
+    PSInputBrdfLut output;
+    
+    // 将 0, 1, 2 映射到 texcoord (0, 0), (0, 2), (2, 0)
+    output.texcoord = float2((vid << 1) & 2, (vid & 2));
+    // 将 texcoord 映射到 position (-1, -1), (-1, 3), (3, -1)
+    output.position = float4(output.texcoord * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    
+    return output;
+}
+float4 BrdfLutPS(PSInputBrdfLut input) : SV_Target
+{
+    // input.texcoord 在 [0, 1] (VS中已映射好)
+    // 映射到 NdotV 和 roughness
+    float NdotV = input.texcoord.x;
+    float roughness = input.texcoord.y;
+    
+    // 计算积分
+    float2 result = IntegrateBRDF(NdotV, roughness);
+    
+    // 将结果存储到 R16G16_FLOAT 纹理中
+    return float4(result.x, result.y, 0.0, 1.0);
+}
+```
+
+上面BRDFLUTPS的循环积分，实际上是在算：
+
+- **Red 通道 (A)**: 累加的是菲涅尔公式中 $F_0$ 的**系数部分**，乘以 G 的影响。
+- **Green 通道 (B)**: 累加的是菲涅尔公式中**常数部分**（也就是 $F_{90}$，通常为1的那个部分），乘以 G 的影响。
+
+#### 本质
+
+LUT 就是通过大量的随机采样（IntegrateBRDF），去“估计”出这套“近似物理规则”（GeometrySmith_IBL）在各种角度下的最终表现结果。PBR的贴图提供了各种材质的变量，比如F0，而LUT的计算的时候通过简化计算，并且通过近似+大量采样的方法，预计算了各种观察角度下的一种近似。
+
+但是这也不对啊，微表面的模型为什么可以用这种积分采样的方法来近似呢？
+
+且看Gemini老师的解释：
+
+![image-20251120200415886](assets/image-20251120200415886.png)
+
+![image-20251120200524362](assets/image-20251120200524362.png)
+
+重点在于，这里计算的是：环境光照
+
+![image-20251120200834774](assets/image-20251120200834774.png)
+
+光线方向的解释：既然我选中了这个朝向 $H$ 的小镜子，而且你在 $V$ 方向看，那么光线 $L$ 必须是从这个方向射过来的，才能被你看见。这个很有道理，意思是，有很多微表面，微表面都有各自的法线，根据法线和观察角度V，是可以计算出对应微表面需要接受哪个方向的入射光，才能如此角度出射的，
+
+所以如果根据粗糙度，生成采样的光线，去采样，就能近似出一个结果
+
+![image-20251120202249370](assets/image-20251120202249370.png)
+
+最后LUT查找表的结构是这样的：横轴是粗糙度F0，纵轴是Cos$\theta$ ，也就是N*V
+
+最后BrdfLutPS不是吧两个值存入了A和B吗，这其实就是简化后的$$\text{最终反射强度} = F_0 \cdot \mathbf{A} + \mathbf{B}$$的A和B
+
+
+
+### 预滤波环境贴图Prefilter Map
+
+Prefilter Map 是告诉显卡：“对于这个粗糙度，四面八方射过来的**光的平均颜色**是什么？”（这是**环境的光照属性**，与材质无关）
+
+![image-20251120204013662](assets/image-20251120204013662.png)
+
+#### 为什么要卷积天空盒？
+
+Prefilter Map的第一步是卷积多层的天空盒，然后以MipMap的形式存储这里的 Mipmap **不是**为了像传统纹理那样解决“远处纹理闪烁”的问题，而是为了存储**不同粗糙度（Roughness）**下的模糊结果。
+
+想象你站在窗前看外面的风景（天空盒）：
+
+- **Mip 0 (原始尺寸, 1024x1024)**：窗户是**透明洁净的玻璃**。风景清晰可见。这对应 **Roughness = 0**（完美镜面）。
+- **Mip 1 (512x512)**：窗户变成了**轻微的磨砂玻璃**。风景稍微有点糊。这对应 **Roughness = 0.2**。
+- **Mip 2 (256x256)**：窗户变成了**浴室的毛玻璃**。只能看见模糊的颜色块。这对应 **Roughness = 0.4**。
+- **Mip 5 (32x32)**：窗户变成了**厚厚的雾面塑料**。只能看见大致的一团光。这对应 **Roughness = 1.0**。
+
+我们生成 Mipmap，其实是在**预先计算模糊**。 在运行时，如果材质 Roughness = 0.5，我们就直接去采样 Mip 3。显卡就不需要实时去把周围几百个像素加起来求平均了，直接读一个像素就行。
+
+> 有人可能会说这就像漫反射那样预计算一张Cube纹理不就好了吗。**这里的区别是漫反射是视角无关的，也就是说在任何一点看到的光照结果都一样,而光泽反射是与视角有关的，**所以我们不能简单的进行预计算。
+
+#### 既然是反应颜色，为什么要观察视角？
+
+观察角度 $V$反应的是具体应该去CubeMap哪个部分采样（对应的降采样后的CubeMap-UV）
+
+#### 为什么需要粗糙度？
+
+**观察角度**决定了去 Cubemap 的**哪个位置 (UV)** 采样。
+
+**粗糙度**决定了去 Cubemap 的**哪一层 (Mip Level)** 采样。
+
+#### 小小总结
+
+| **特性**     | **BRDF LUT **                      | **Prefilter Map**                        |
+| ------------ | ---------------------------------- | ---------------------------------------- |
+| **目的**     | 解决 **$\int f_s ...$ (BRDF部分)** | 解决 **$\int L_i ...$ (光照部分)**       |
+| **输入**     | 只有数学参数 (NdotV, Roughness)    | **环境贴图 (Skybox)** + 粗糙度           |
+| **输出**     | **RG16F (两个系数)**               | **RGBA (光照颜色)**                      |
+| **采样对象** | **无** (只用数学公式算)            | **采样 Skybox 纹理**                     |
+| **坐标空间** | 切线空间 (Tangent Space)           | 世界空间 (World Space)                   |
+| **何时运行** | 游戏启动一次 (或离线烘焙)          | **每当场景/天空盒变化时** (例如日夜循环) |
+
+Prefilter Map作用是 **生成“预滤波环境贴图” (Pre-filtered Environment Map)**。
+
+- 它读取原始清晰的天空盒（Skybox）。
+- 根据不同的**粗糙度（Roughness）**，把天空盒进行不同程度的**模糊处理**。
+- 最终结果通常存成一个 Cubemap 的 **Mipmap 链**：
+  - `Mip 0`: 存 Roughness = 0 的图（清晰的镜面反射）。
+  - `Mip 1`: 存 Roughness = 0.2 的图（稍微模糊）。
+  - ...
+  - `Mip N`: 存 Roughness = 1.0 的图（非常模糊，像磨砂玻璃）。
+
+**LUT** 是告诉显卡：“如果光来了，不管是什么颜色的光，我有多少概率把它反射出去？”（这是**材质的物理属性**，与环境无关）。
+
+**Prefilter** 是告诉显卡：“对于这个粗糙度，四面八方射过来的**光的平均颜色**是什么？”（这是**环境的光照属性**，与材质无关）。
+
+```cpp
+float4 PrefilterPS(PSInputSky input) : SV_Target
+{
+    // R 是我们采样的方向 (来自 VS 的 texcoord)
+    float3 R = normalize(input.texcoord);
+    // V = R (因为我们假设 V = R = N)
+    float3 V = R;
+    float3 N = R;
+    
+    // 粗糙度来自 CBV b0 (textureInfo.y)
+    float roughness = textureInfo.y;
+    
+    // 我们需要TBN来转换采样
+    float3 up = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    float3 T = normalize(cross(up, N));
+    float3 B = cross(N, T);
+    float3x3 TBN = float3x3(T, B, N);
+
+    float3 prefilteredColor = float3(0.0, 0.0, 0.0);
+    float totalWeight = 0.0;
+    
+    const uint SAMPLE_COUNT = 1024u;
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+    {
+        // 获取低差异采样点
+        float2 Xi = Hammersley(i, SAMPLE_COUNT);
+        // 生成 H (半程向量), 基于 GGX 重要性采样
+        float3 H = ImportanceSampleGGX(Xi, N, roughness);
+        // 计算 L (光照/采样向量)
+        float3 L = normalize(2.0 * dot(V, H) * H - V);
+        
+        float NdotL = saturate(dot(N, L));
+        if (NdotL > 0.0)
+        {
+            // 用 L 采样天空盒
+            prefilteredColor += g_SkyboxTexture.Sample(g_SamplerMainSky, L).rgb * NdotL;
+            totalWeight += NdotL;
+        }
+    }
+    
+    // 平均采样结果
+    prefilteredColor = prefilteredColor / totalWeight;
+    
+    return float4(prefilteredColor, 1.0);
+}
+```
+
+PrefilterPS的输出是像素，但是这个像素是特定粗糙度下的颜色
+
+意思是PrefilterPS在DX那边的调用类似于：
+
+```cpp
+// Pass: 预计算 Prefiltered Map
+void D3D12App::RenderPrefilteredMap()
+{
+   	//....
+    // 循环 5 个 Mip 级别
+    for (UINT mip = 0; mip < prefilterMapMips; ++mip) 					//  <---第一层for
+    {
+        // 1. 计算该 Mip 的粗糙度
+        float roughness = (float)mip / (float)(prefilterMapMips - 1);
+
+        // 2. 计算该 Mip 的视口大小
+        UINT mipWidth = (UINT)(prefilterMapSize * std::pow(0.5, mip));
+        UINT mipHeight = (UINT)(prefilterMapSize * std::pow(0.5, mip));
+        D3D12_VIEWPORT mipViewport = { 0.0f, 0.0f, (float)mipWidth, (float)mipHeight, 0.0f, 1.0f };
+        D3D12_RECT mipScissorRect = { 0, 0, (LONG)mipWidth, (LONG)mipHeight };
+        m_CommandList->RSSetViewports(1, &mipViewport);
+        m_CommandList->RSSetScissorRects(1, &mipScissorRect);
+
+        // 循环 6 个面
+        for (UINT face = 0; face < 6; ++face) 							//  <---第二层for
+        {
+            // 3. 更新 CBV
+            XMMATRIX skyboxWvp = captureViews[face] * captureProj;
+            XMStoreFloat4x4(&m_Constants.wvpMatrix, skyboxWvp);
+            // 技巧: 将 roughness 存储在 textureInfo.y 中
+            m_Constants.textureInfo.y = roughness;
+
+            // (复用天空盒的 CBV 槽位: 3)
+            memcpy(m_pConstantBufferDataBegin + c_alignedSceneConstantBufferSize * 3, &m_Constants, sizeof(SceneConstants));
+            m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress() + c_alignedSceneConstantBufferSize * 3);
+
+            // 4. 设置 RTV (在 RTV 堆中的正确偏移)
+            m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+            // 5. 绘制立方体 (内部)
+            m_CommandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+
+            // 6. 移动到下一个 RTV 句柄
+            rtvHandle.Offset(1, iblRtvDescriptorSize);
+        }
+    }
+```
+
+
+
+
+
+
 
 # API
 
